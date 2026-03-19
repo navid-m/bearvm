@@ -93,7 +93,7 @@ const Token = union(TokenTag) {
     eof,
 };
 
-// Perfect hash for keywords — avoids 18 string comparisons per identifier
+/// Comptime keyword table — avoids 18 string comparisons per identifier.
 fn keywordToken(word: []const u8) ?Token {
     const kws = .{
         .{ "const", Token.kw_const },
@@ -169,7 +169,7 @@ fn tokenize(src: []const u8, alloc: Allocator) !List(Token) {
             },
             '"' => {
                 i += 1;
-                var s = List(u8).empty;
+                var s: List(u8) = .empty;
                 while (i < src.len and src[i] != '"') {
                     if (src[i] == '\\' and i + 1 < src.len) {
                         i += 1;
@@ -217,8 +217,7 @@ fn tokenize(src: []const u8, alloc: Allocator) !List(Token) {
                     const start = i;
                     while (i < src.len and (std.ascii.isAlphanumeric(src[i]) or src[i] == '_')) i += 1;
                     const word = src[start..i];
-                    const tok = keywordToken(word) orelse Token{ .ident = word };
-                    try tokens.append(alloc, tok);
+                    try tokens.append(alloc, keywordToken(word) orelse Token{ .ident = word });
                 } else return error.UnexpectedChar;
             },
         }
@@ -230,13 +229,21 @@ fn tokenize(src: []const u8, alloc: Allocator) !List(Token) {
 const Ty = enum { int, void_, str, bool_, named };
 const StructDef = struct { name: []const u8, fields: List(StructField) };
 const StructField = struct { name: []const u8, ty: Ty };
-const Function = struct { name: []const u8, params: List(Param), ret_ty: Ty, body: List(Stmt) };
-const Param = struct { name: []const u8, ty: Ty };
-const Program = struct { structs: List(StructDef), functions: List(Function) };
+const RegIdx = u16;
 
+const Function = struct {
+    name: []const u8,
+    params: List(Param),
+    ret_ty: Ty,
+    body: List(Stmt),
+    n_regs: u16,
+};
+
+const Param = struct { name: []const u8, ty: Ty, idx: RegIdx };
+const Program = struct { structs: List(StructDef), functions: List(Function) };
 const Stmt = union(enum) {
-    assign: struct { reg: []const u8, expr: *Expr },
-    set_field: struct { reg: []const u8, field: []const u8, expr: *Expr },
+    assign: struct { reg: RegIdx, expr: *Expr },
+    set_field: struct { reg: RegIdx, field: []const u8, expr: *Expr },
     call: struct { name: []const u8, args: List(*Expr) },
     ret: *Expr,
     while_: struct { cond: *Expr, body: List(Stmt) },
@@ -247,8 +254,8 @@ const FieldInit = struct { name: []const u8, expr: *Expr };
 const Expr = union(enum) {
     int: i64,
     str: []const u8,
-    reg: []const u8,
-    field: struct { reg: []const u8, field: []const u8 },
+    reg: RegIdx,
+    field: struct { reg: RegIdx, field: []const u8 },
     const_: *Expr,
     add: BinOp,
     sub: BinOp,
@@ -263,6 +270,23 @@ const Expr = union(enum) {
     named: []const u8,
 };
 
+const ExprSlab = struct {
+    buf: []Expr,
+    used: usize,
+
+    fn init(alloc: Allocator, cap: usize) !ExprSlab {
+        return .{ .buf = try alloc.alloc(Expr, cap), .used = 0 };
+    }
+
+    fn alloc_node(self: *ExprSlab, e: Expr) error{OutOfMemory}!*Expr {
+        if (self.used >= self.buf.len) return error.OutOfMemory;
+        const p = &self.buf[self.used];
+        p.* = e;
+        self.used += 1;
+        return p;
+    }
+};
+
 const ParseError = error{
     UnexpectedToken,
     ExpectedIdent,
@@ -273,13 +297,38 @@ const ParseError = error{
     UnexpectedExprToken,
     UnexpectedStmtToken,
     UnexpectedTopLevel,
+    TooManyRegisters,
     OutOfMemory,
+};
+
+/// Per-function register name -> index map built during parsing.
+const RegMap = struct {
+    names: List([]const u8),
+    alloc: Allocator,
+
+    fn init(alloc: Allocator) RegMap {
+        return .{ .names = .empty, .alloc = alloc };
+    }
+
+    fn intern(self: *RegMap, name: []const u8) !RegIdx {
+        for (self.names.items, 0..) |n, i|
+            if (std.mem.eql(u8, n, name)) return @intCast(i);
+        const idx: RegIdx = @intCast(self.names.items.len);
+        if (idx == std.math.maxInt(RegIdx)) return error.TooManyRegisters;
+        try self.names.append(self.alloc, name);
+        return idx;
+    }
+
+    fn count(self: *const RegMap) u16 {
+        return @intCast(self.names.items.len);
+    }
 };
 
 const Parser = struct {
     tokens: []const Token,
     pos: usize,
     alloc: Allocator,
+    slab: *ExprSlab,
 
     fn peek(self: *Parser) Token {
         return self.tokens[self.pos];
@@ -329,12 +378,12 @@ const Parser = struct {
         };
     }
 
-    fn parseArgs(self: *Parser) ParseError!List(*Expr) {
-        var args = List(*Expr).empty;
+    fn parseArgs(self: *Parser, rm: *RegMap) ParseError!List(*Expr) {
+        var args: List(*Expr) = .empty;
         if (std.meta.activeTag(self.peek()) != .lparen) return args;
         _ = self.advance();
         while (std.meta.activeTag(self.peek()) != .rparen) {
-            try args.append(self.alloc, try self.parseExpr());
+            try args.append(self.alloc, try self.parseExpr(rm));
             if (std.meta.activeTag(self.peek()) == .comma) _ = self.advance();
         }
         _ = try self.expectTag(.rparen);
@@ -342,16 +391,14 @@ const Parser = struct {
     }
 
     fn box(self: *Parser, e: Expr) ParseError!*Expr {
-        const p = try self.alloc.create(Expr);
-        p.* = e;
-        return p;
+        return self.slab.alloc_node(e);
     }
 
-    fn parseBinOp(self: *Parser, comptime tag: TokenTag) ParseError!*Expr {
+    fn parseBinOp(self: *Parser, rm: *RegMap, comptime tag: TokenTag) ParseError!*Expr {
         _ = self.advance();
-        const a = try self.parseExpr();
+        const a = try self.parseExpr(rm);
         _ = try self.expectTag(.comma);
-        const b = try self.parseExpr();
+        const b = try self.parseExpr(rm);
         const payload = BinOp{ .a = a, .b = b };
         return self.box(switch (tag) {
             .kw_add => .{ .add = payload },
@@ -365,19 +412,19 @@ const Parser = struct {
         });
     }
 
-    fn parseExpr(self: *Parser) ParseError!*Expr {
+    fn parseExpr(self: *Parser, rm: *RegMap) ParseError!*Expr {
         return switch (self.peek()) {
             .kw_const => blk: {
                 _ = self.advance();
-                break :blk try self.box(.{ .const_ = try self.parseExpr() });
+                break :blk try self.box(.{ .const_ = try self.parseExpr(rm) });
             },
-            .kw_add => try self.parseBinOp(.kw_add),
-            .kw_sub => try self.parseBinOp(.kw_sub),
-            .kw_mul => try self.parseBinOp(.kw_mul),
-            .kw_div => try self.parseBinOp(.kw_div),
-            .kw_lt => try self.parseBinOp(.kw_lt),
-            .kw_gt => try self.parseBinOp(.kw_gt),
-            .kw_eq => try self.parseBinOp(.kw_eq),
+            .kw_add => try self.parseBinOp(rm, .kw_add),
+            .kw_sub => try self.parseBinOp(rm, .kw_sub),
+            .kw_mul => try self.parseBinOp(rm, .kw_mul),
+            .kw_div => try self.parseBinOp(rm, .kw_div),
+            .kw_lt => try self.parseBinOp(rm, .kw_lt),
+            .kw_gt => try self.parseBinOp(rm, .kw_gt),
+            .kw_eq => try self.parseBinOp(rm, .kw_eq),
             .kw_call => blk: {
                 _ = self.advance();
                 const name = switch (self.advance()) {
@@ -385,11 +432,11 @@ const Parser = struct {
                     .func => |s| s,
                     else => return error.ExpectedFuncName,
                 };
-                break :blk try self.box(.{ .call = .{ .name = name, .args = try self.parseArgs() } });
+                break :blk try self.box(.{ .call = .{ .name = name, .args = try self.parseArgs(rm) } });
             },
             .kw_alloc => blk: {
                 _ = self.advance();
-                break :blk try self.box(.{ .alloc = try self.parseExpr() });
+                break :blk try self.box(.{ .alloc = try self.parseExpr(rm) });
             },
             .int => |n| blk: {
                 _ = self.advance();
@@ -401,21 +448,29 @@ const Parser = struct {
             },
             .reg => |r| blk: {
                 _ = self.advance();
+                const idx = try rm.intern(r);
                 if (std.meta.activeTag(self.peek()) == .dot) {
                     _ = self.advance();
-                    break :blk try self.box(.{ .field = .{ .reg = r, .field = try self.expectIdent() } });
+                    break :blk try self.box(.{ .field = .{
+                        .reg = idx,
+                        .field = try self.expectIdent(),
+                    } });
                 }
-                break :blk try self.box(.{ .reg = r });
+                break :blk try self.box(.{ .reg = idx });
             },
             .ident => |name| blk: {
                 _ = self.advance();
                 if (std.meta.activeTag(self.peek()) == .lbrace) {
                     _ = self.advance();
-                    var fields = List(FieldInit).empty;
+                    var fields: List(FieldInit) = .empty;
                     while (std.meta.activeTag(self.peek()) != .rbrace) {
                         const fname = try self.expectIdent();
                         _ = try self.expectTag(.colon);
-                        try fields.append(self.alloc, .{ .name = fname, .expr = try self.parseExpr() });
+                        try fields.append(self.alloc, .{
+                            .name = fname,
+                            .expr = try self.parseExpr(rm),
+                        });
+                        if (std.meta.activeTag(self.peek()) == .comma) _ = self.advance();
                     }
                     _ = try self.expectTag(.rbrace);
                     break :blk try self.box(.{ .struct_lit = .{ .name = name, .fields = fields } });
@@ -426,20 +481,26 @@ const Parser = struct {
         };
     }
 
-    fn parseStmt(self: *Parser) ParseError!Stmt {
+    fn parseStmt(self: *Parser, rm: *RegMap) ParseError!Stmt {
         return switch (self.peek()) {
             .reg => |r| blk: {
                 _ = self.advance();
+                const idx = try rm.intern(r);
                 _ = try self.expectTag(.assign);
-                break :blk .{ .assign = .{ .reg = r, .expr = try self.parseExpr() } };
+                break :blk .{ .assign = .{ .reg = idx, .expr = try self.parseExpr(rm) } };
             },
             .kw_set => blk: {
                 _ = self.advance();
                 const r = try self.expectReg();
+                const idx = try rm.intern(r);
                 _ = try self.expectTag(.dot);
                 const field = try self.expectIdent();
                 _ = try self.expectTag(.assign);
-                break :blk .{ .set_field = .{ .reg = r, .field = field, .expr = try self.parseExpr() } };
+                break :blk .{ .set_field = .{
+                    .reg = idx,
+                    .field = field,
+                    .expr = try self.parseExpr(rm),
+                } };
             },
             .kw_call => blk: {
                 _ = self.advance();
@@ -448,21 +509,21 @@ const Parser = struct {
                     .func => |s| s,
                     else => return error.ExpectedFuncName,
                 };
-                break :blk .{ .call = .{ .name = name, .args = try self.parseArgs() } };
+                break :blk .{ .call = .{ .name = name, .args = try self.parseArgs(rm) } };
             },
             .kw_ret => blk: {
                 _ = self.advance();
-                break :blk .{ .ret = try self.parseExpr() };
+                break :blk .{ .ret = try self.parseExpr(rm) };
             },
             .kw_while => blk: {
                 _ = self.advance();
                 _ = try self.expectTag(.lparen);
-                const cond = try self.parseExpr();
+                const cond = try self.parseExpr(rm);
                 _ = try self.expectTag(.rparen);
                 _ = try self.expectTag(.lbrace);
-                var body = List(Stmt).empty;
+                var body: List(Stmt) = .empty;
                 while (std.meta.activeTag(self.peek()) != .rbrace)
-                    try body.append(self.alloc, try self.parseStmt());
+                    try body.append(self.alloc, try self.parseStmt(rm));
                 _ = try self.expectTag(.rbrace);
                 break :blk .{ .while_ = .{ .cond = cond, .body = body } };
             },
@@ -474,7 +535,7 @@ const Parser = struct {
         _ = try self.expectTag(.kw_struct);
         const name = try self.expectIdent();
         _ = try self.expectTag(.lbrace);
-        var fields = List(StructField).empty;
+        var fields: List(StructField) = .empty;
         while (std.meta.activeTag(self.peek()) != .rbrace) {
             const fname = try self.expectIdent();
             _ = try self.expectTag(.colon);
@@ -486,13 +547,17 @@ const Parser = struct {
 
     fn parseFunction(self: *Parser) ParseError!Function {
         const name = try self.expectFunc();
-        var params = List(Param).empty;
+        var rm = RegMap.init(self.alloc);
+
+        var params: List(Param) = .empty;
         if (std.meta.activeTag(self.peek()) == .lparen) {
             _ = self.advance();
             while (std.meta.activeTag(self.peek()) != .rparen) {
                 const pname = try self.expectReg();
                 _ = try self.expectTag(.colon);
-                try params.append(self.alloc, .{ .name = pname, .ty = try self.parseTy() });
+                const ty = try self.parseTy();
+                const idx = try rm.intern(pname);
+                try params.append(self.alloc, .{ .name = pname, .ty = ty, .idx = idx });
                 if (std.meta.activeTag(self.peek()) == .comma) _ = self.advance();
             }
             _ = try self.expectTag(.rparen);
@@ -502,16 +567,22 @@ const Parser = struct {
             break :blk try self.parseTy();
         } else .void_;
         _ = try self.expectTag(.lbrace);
-        var body = List(Stmt).empty;
+        var body: List(Stmt) = .empty;
         while (std.meta.activeTag(self.peek()) != .rbrace)
-            try body.append(self.alloc, try self.parseStmt());
+            try body.append(self.alloc, try self.parseStmt(&rm));
         _ = try self.expectTag(.rbrace);
-        return .{ .name = name, .params = params, .ret_ty = ret_ty, .body = body };
+        return .{
+            .name = name,
+            .params = params,
+            .ret_ty = ret_ty,
+            .body = body,
+            .n_regs = rm.count(),
+        };
     }
 
     fn parseProgram(self: *Parser) ParseError!Program {
-        var structs = List(StructDef).empty;
-        var functions = List(Function).empty;
+        var structs: List(StructDef) = .empty;
+        var functions: List(Function) = .empty;
         while (std.meta.activeTag(self.peek()) != .eof) {
             switch (self.peek()) {
                 .kw_struct => try structs.append(self.alloc, try self.parseStruct()),
@@ -524,11 +595,10 @@ const Parser = struct {
 };
 
 fn parse(tokens: []const Token, alloc: Allocator) !Program {
-    var p = Parser{ .tokens = tokens, .pos = 0, .alloc = alloc };
+    var slab = try ExprSlab.init(alloc, tokens.len / 3 + 64);
+    var p = Parser{ .tokens = tokens, .pos = 0, .alloc = alloc, .slab = &slab };
     return p.parseProgram();
 }
-
-const Env = std.StringArrayHashMap(Value);
 
 const Value = union(enum) {
     int: i64,
@@ -546,6 +616,14 @@ const StructVal = struct {
 };
 
 const FileHandle = union(enum) { read: std.fs.File, write: std.fs.File };
+const BuiltinTag = enum { puts, open, read, write, close };
+const builtin_map = std.StaticStringMap(BuiltinTag).initComptime(.{
+    .{ "puts", .puts },
+    .{ "open", .open },
+    .{ "read", .read },
+    .{ "write", .write },
+    .{ "close", .close },
+});
 
 const Vm = struct {
     program: *const Program,
@@ -573,17 +651,14 @@ const Vm = struct {
         return @intCast(self.files.items.len - 1);
     }
 
-    fn evalExpr(self: *Vm, expr: *const Expr, env: *Env) anyerror!Value {
+    fn evalExpr(self: *Vm, expr: *const Expr, env: []Value) anyerror!Value {
         return switch (expr.*) {
             .int => |n| .{ .int = n },
             .str => |s| .{ .str = s },
-            .reg => |r| env.get(r) orelse return error.UndefinedRegister,
-            .field => |f| blk: {
-                const base = env.get(f.reg) orelse return error.UndefinedRegister;
-                break :blk switch (base) {
-                    .struct_ => |sv| sv.fields.get(f.field) orelse return error.NoSuchField,
-                    else => return error.NotAStruct,
-                };
+            .reg => |r| env[r],
+            .field => |f| switch (env[f.reg]) {
+                .struct_ => |sv| sv.fields.get(f.field) orelse return error.NoSuchField,
+                else => return error.NotAStruct,
             },
             .const_ => |inner| try self.evalExpr(inner, env),
             .add => |op| .{ .int = (try self.evalExpr(op.a, env)).int +% (try self.evalExpr(op.b, env)).int },
@@ -625,22 +700,14 @@ const Vm = struct {
     fn printValue(_: *Vm, val: Value) void {
         var tmp: [64]u8 = undefined;
         switch (val) {
-            .int => |n| {
-                const s = std.fmt.bufPrint(&tmp, "{d}\n", .{n}) catch return;
-                writeStdout(s);
-            },
+            .int => |n| writeStdout(std.fmt.bufPrint(&tmp, "{d}\n", .{n}) catch return),
             .str => |s| {
                 writeStdout(s);
                 writeStdout("\n");
             },
-            .bool_ => |b| {
-                writeStdout(if (b) "true\n" else "false\n");
-            },
+            .bool_ => |b| writeStdout(if (b) "true\n" else "false\n"),
             .ptr => writeStdout("<ptr>\n"),
-            .file => |fd| {
-                const s = std.fmt.bufPrint(&tmp, "<fd:{d}>\n", .{fd}) catch return;
-                writeStdout(s);
-            },
+            .file => |fd| writeStdout(std.fmt.bufPrint(&tmp, "<fd:{d}>\n", .{fd}) catch return),
             .void_ => {},
             .struct_ => |sv| {
                 writeStdout(sv.name);
@@ -649,92 +716,97 @@ const Vm = struct {
         }
     }
 
-    /// Use a fixed stack buffer for args to avoid heap allocation on every call
-    fn callFunc(self: *Vm, name: []const u8, arg_exprs: []*Expr, env: *Env) anyerror!Value {
+    fn callFunc(self: *Vm, name: []const u8, arg_exprs: []*Expr, env: []Value) anyerror!Value {
         var args_buf: [32]Value = undefined;
         const argc = arg_exprs.len;
-        std.debug.assert(argc <= 32);
+        if (argc > 32) return error.TooManyArguments;
         for (arg_exprs, 0..) |a, i|
             args_buf[i] = try self.evalExpr(a, env);
         const args = args_buf[0..argc];
 
-        if (std.mem.eql(u8, name, "puts")) {
-            for (args) |a| self.printValue(a);
-            flushStdout();
-            return .void_;
-        }
-        if (std.mem.eql(u8, name, "open")) {
-            const path = args[0].str;
-            const mode = args[1].int;
-            const fd = if (mode == 0) blk: {
-                const f = try std.fs.cwd().openFile(path, .{});
-                break :blk try self.allocFile(.{ .read = f });
-            } else blk: {
-                const f = try std.fs.cwd().createFile(path, .{ .truncate = true });
-                break :blk try self.allocFile(.{ .write = f });
-            };
-            return .{ .file = fd };
-        }
-        if (std.mem.eql(u8, name, "read")) {
-            const fd: usize = @intCast(args[0].file);
-            const size: usize = @intCast(args[2].int);
-            const buf = try self.alloc.alloc(u8, size);
-            const n = switch (self.files.items[fd].?) {
-                .read => |f| try f.read(buf),
-                else => return error.InvalidFileHandle,
-            };
-            return .{ .str = buf[0..n] };
-        }
-        if (std.mem.eql(u8, name, "write")) {
-            const fd: usize = @intCast(args[0].file);
-            const data: []const u8 = switch (args[1]) {
-                .str => |s| s,
-                .ptr => |p| p,
-                else => return error.TypeMismatch,
-            };
-            switch (self.files.items[fd].?) {
-                .write => |f| try f.writeAll(data),
-                else => return error.InvalidFileHandle,
-            }
-            return .{ .int = @intCast(data.len) };
-        }
-        if (std.mem.eql(u8, name, "close")) {
-            const fd: usize = @intCast(args[0].file);
-            if (fd < self.files.items.len) {
-                if (self.files.items[fd]) |fh| {
-                    switch (fh) {
-                        .read => |f| f.close(),
-                        .write => |f| f.close(),
+        if (builtin_map.get(name)) |tag| {
+            return switch (tag) {
+                .puts => blk: {
+                    for (args) |a| self.printValue(a);
+                    flushStdout();
+                    break :blk .void_;
+                },
+                .open => blk: {
+                    const path = args[0].str;
+                    const mode = args[1].int;
+                    const fd = if (mode == 0) inner: {
+                        const f = try std.fs.cwd().openFile(path, .{});
+                        break :inner try self.allocFile(.{ .read = f });
+                    } else inner: {
+                        const f = try std.fs.cwd().createFile(path, .{ .truncate = true });
+                        break :inner try self.allocFile(.{ .write = f });
+                    };
+                    break :blk .{ .file = fd };
+                },
+                .read => blk: {
+                    const fd: usize = @intCast(args[0].file);
+                    const size: usize = @intCast(args[2].int);
+                    const buf = try self.alloc.alloc(u8, size);
+                    const n = switch (self.files.items[fd].?) {
+                        .read => |f| try f.read(buf),
+                        else => return error.InvalidFileHandle,
+                    };
+                    break :blk .{ .str = buf[0..n] };
+                },
+                .write => blk: {
+                    const fd: usize = @intCast(args[0].file);
+                    const data: []const u8 = switch (args[1]) {
+                        .str => |s| s,
+                        .ptr => |p| p,
+                        else => return error.TypeMismatch,
+                    };
+                    switch (self.files.items[fd].?) {
+                        .write => |f| try f.writeAll(data),
+                        else => return error.InvalidFileHandle,
                     }
-                    self.files.items[fd] = null;
-                }
-            }
-            return .void_;
+                    break :blk .{ .int = @intCast(data.len) };
+                },
+                .close => blk: {
+                    const fd: usize = @intCast(args[0].file);
+                    if (fd < self.files.items.len) {
+                        if (self.files.items[fd]) |fh| {
+                            switch (fh) {
+                                .read => |f| f.close(),
+                                .write => |f| f.close(),
+                            }
+                            self.files.items[fd] = null;
+                        }
+                    }
+                    break :blk .void_;
+                },
+            };
         }
 
         const func = self.findFunc(name) orelse return error.UndefinedFunction;
-        var new_env = Env.init(self.alloc);
-        try new_env.ensureTotalCapacity(func.params.items.len + 4);
+        const new_env = try self.alloc.alloc(Value, func.n_regs);
+
+        @memset(new_env, .void_);
+
         for (func.params.items, 0..) |param, i|
-            try new_env.put(param.name, args[i]);
-        return (try self.execBody(func.body.items, &new_env)) orelse .void_;
+            new_env[param.idx] = args[i];
+
+        return (try self.execBody(func.body.items, new_env)) orelse .void_;
     }
 
-    fn execBody(self: *Vm, stmts: []const Stmt, env: *Env) anyerror!?Value {
+    fn execBody(self: *Vm, stmts: []const Stmt, env: []Value) anyerror!?Value {
         for (stmts) |*stmt|
             if (try self.execStmt(stmt, env)) |v| return v;
         return null;
     }
 
-    fn execStmt(self: *Vm, stmt: *const Stmt, env: *Env) anyerror!?Value {
+    fn execStmt(self: *Vm, stmt: *const Stmt, env: []Value) anyerror!?Value {
         switch (stmt.*) {
             .assign => |a| {
-                try env.put(a.reg, try self.evalExpr(a.expr, env));
+                env[a.reg] = try self.evalExpr(a.expr, env);
             },
             .set_field => |sf| {
                 const val = try self.evalExpr(sf.expr, env);
-                const entry = env.getPtr(sf.reg) orelse return error.UndefinedRegister;
-                try entry.struct_.fields.put(sf.field, val);
+                try env[sf.reg].struct_.fields.put(sf.field, val);
             },
             .call => |c| {
                 _ = try self.callFunc(c.name, c.args.items, env);
@@ -742,8 +814,7 @@ const Vm = struct {
             .ret => |e| return try self.evalExpr(e, env),
             .while_ => |w| {
                 while (true) {
-                    const cv = try self.evalExpr(w.cond, env);
-                    const keep = switch (cv) {
+                    const keep = switch (try self.evalExpr(w.cond, env)) {
                         .bool_ => |b| b,
                         .int => |n| n != 0,
                         else => return error.TypeMismatch,
@@ -759,9 +830,10 @@ const Vm = struct {
 
 fn run(program: *const Program, alloc: Allocator) !void {
     var vm = Vm.init(program, alloc);
-    const main_func = vm.findFunc("main") orelse return error.NoMainFunction;
-    var env = Env.init(alloc);
-    _ = try vm.execBody(main_func.body.items, &env);
+    const main_fn = vm.findFunc("main") orelse return error.NoMainFunction;
+    const env = try alloc.alloc(Value, main_fn.n_regs);
+    @memset(env, .void_);
+    _ = try vm.execBody(main_fn.body.items, env);
 }
 
 pub fn main() !void {
@@ -775,9 +847,8 @@ pub fn main() !void {
         std.process.exit(1);
     }
 
-    const path = argv[1];
-    const src = std.fs.cwd().readFileAlloc(alloc, path, 10 * 1024 * 1024) catch |e| {
-        std.debug.print("Error reading {s}: {}\n", .{ path, e });
+    const src = std.fs.cwd().readFileAlloc(alloc, argv[1], 10 * 1024 * 1024) catch |e| {
+        std.debug.print("Error reading {s}: {}\n", .{ argv[1], e });
         std.process.exit(1);
     };
 
