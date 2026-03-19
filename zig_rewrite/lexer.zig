@@ -21,6 +21,8 @@ pub const TokenTag = enum(u8) {
     kw_alloc,
     kw_set,
     kw_struct,
+    kw_jmp,
+    kw_br_if,
     ty_int,
     ty_void,
     ty_string,
@@ -56,6 +58,8 @@ pub const Token = union(TokenTag) {
     kw_alloc,
     kw_set,
     kw_struct,
+    kw_jmp,
+    kw_br_if,
     ty_int,
     ty_void,
     ty_string,
@@ -88,6 +92,8 @@ pub fn keywordToken(word: []const u8) ?Token {
         .{ "alloc", Token.kw_alloc },
         .{ "set", Token.kw_set },
         .{ "struct", Token.kw_struct },
+        .{ "jmp", Token.kw_jmp },
+        .{ "br_if", Token.kw_br_if },
         .{ "int", Token.ty_int },
         .{ "void", Token.ty_void },
         .{ "string", Token.ty_string },
@@ -268,6 +274,9 @@ pub const Stmt = union(enum) {
     call: struct { name: []const u8, args: std.ArrayListUnmanaged(*Expr) },
     ret: *Expr,
     while_: struct { cond: *Expr, body: std.ArrayListUnmanaged(Stmt) },
+    label: []const u8,
+    jmp: []const u8,
+    br_if: struct { cond: RegIdx, true_label: []const u8, false_label: []const u8 },
 
     pub fn deinit(self: *Stmt, alloc: std.mem.Allocator) void {
         switch (self.*) {

@@ -170,6 +170,21 @@ const Printer = struct {
                     }
                 }
             },
+            .label => |name| {
+                const label = try std.fmt.allocPrint(alloc, "label({s}:)", .{name});
+                defer alloc.free(label);
+                self.node(prefix, is_last, depth, label);
+            },
+            .jmp => |target| {
+                const label = try std.fmt.allocPrint(alloc, "jmp({s})", .{target});
+                defer alloc.free(label);
+                self.node(prefix, is_last, depth, label);
+            },
+            .br_if => |br| {
+                const label = try std.fmt.allocPrint(alloc, "br_if(%{d}, {s}, {s})", .{ br.cond, br.true_label, br.false_label });
+                defer alloc.free(label);
+                self.node(prefix, is_last, depth, label);
+            },
         }
     }
 

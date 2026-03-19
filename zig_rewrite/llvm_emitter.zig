@@ -268,6 +268,14 @@ const Emitter = struct {
                 try w.print("  br label %{s}\n", .{lcheck});
                 try w.print("{s}:\n", .{lend});
             },
+            .label => |name| try w.print("{s}:\n", .{name}),
+            .jmp => |target| try w.print("  br label %{s}\n", .{target}),
+            .br_if => |br| {
+                const cond_v = env[br.cond];
+                const cond1 = try self.fresh();
+                try w.print("  {s} = icmp ne i64 {s}, 0\n", .{ cond1, cond_v });
+                try w.print("  br i1 {s}, label %{s}, label %{s}\n", .{ cond1, br.true_label, br.false_label });
+            },
         }
     }
 

@@ -258,14 +258,29 @@ pub const Vm = struct {
     }
 
     pub fn execBody(self: *Vm, stmts: []const lexer.Stmt, env: []Value) anyerror!?Value {
-        for (stmts) |*stmt| {
+        var label_map = std.StringHashMap(usize).init(self.alloc);
+        defer label_map.deinit();
+        for (stmts, 0..) |*stmt, i| {
+            if (stmt.* == .label) try label_map.put(stmt.label, i);
+        }
+
+        var pc: usize = 0;
+        while (pc < stmts.len) {
+            const stmt = &stmts[pc];
             switch (stmt.*) {
-                .assign => |a| env[a.reg] = try self.evalExpr(a.expr, env),
+                .assign => |a| {
+                    env[a.reg] = try self.evalExpr(a.expr, env);
+                    pc += 1;
+                },
                 .set_field => |sf| {
                     const val = try self.evalExpr(sf.expr, env);
                     try env[sf.reg].struct_.fields.put(sf.field, val);
+                    pc += 1;
                 },
-                .call => |c| _ = try self.callFunc(c.name, c.args.items, env),
+                .call => |c| {
+                    _ = try self.callFunc(c.name, c.args.items, env);
+                    pc += 1;
+                },
                 .ret => |e| return try self.evalExpr(e, env),
                 .while_ => |w| {
                     while (true) {
@@ -277,6 +292,21 @@ pub const Vm = struct {
                         if (!keep) break;
                         if (try self.execBody(w.body.items, env)) |v| return v;
                     }
+                    pc += 1;
+                },
+                .label => pc += 1,
+                .jmp => |target| {
+                    pc = label_map.get(target) orelse return error.UndefinedLabel;
+                },
+                .br_if => |br| {
+                    const cond_val = env[br.cond];
+                    const taken = switch (cond_val) {
+                        .bool_ => |b| b,
+                        .int => |n| n != 0,
+                        else => return error.TypeMismatch,
+                    };
+                    const target = if (taken) br.true_label else br.false_label;
+                    pc = label_map.get(target) orelse return error.UndefinedLabel;
                 },
             }
         }

@@ -201,6 +201,16 @@ const Parser = struct {
 
     fn parseStmt(self: *Parser, rm: *RegMap) ParseError!lexer.Stmt {
         return switch (self.peek()) {
+            .ident => |name| blk: {
+                if (self.pos + 1 < self.tokens.len and
+                    std.meta.activeTag(self.tokens[self.pos + 1]) == .colon)
+                {
+                    _ = self.advance();
+                    _ = self.advance();
+                    break :blk .{ .label = name };
+                }
+                break :blk error.UnexpectedStmtToken;
+            },
             .reg => |r| blk: {
                 _ = self.advance();
                 const idx = try rm.intern(r);
@@ -232,6 +242,25 @@ const Parser = struct {
             .kw_ret => blk: {
                 _ = self.advance();
                 break :blk .{ .ret = try self.parseExpr(rm) };
+            },
+            .kw_jmp => blk: {
+                _ = self.advance();
+                const target = try self.expectIdent();
+                break :blk .{ .jmp = target };
+            },
+            .kw_br_if => blk: {
+                _ = self.advance();
+                const cond_name = try self.expectReg();
+                const cond_idx = try rm.intern(cond_name);
+                _ = try self.expectTag(.comma);
+                const true_label = try self.expectIdent();
+                _ = try self.expectTag(.comma);
+                const false_label = try self.expectIdent();
+                break :blk .{ .br_if = .{
+                    .cond = cond_idx,
+                    .true_label = true_label,
+                    .false_label = false_label,
+                } };
             },
             .kw_while => blk: {
                 _ = self.advance();

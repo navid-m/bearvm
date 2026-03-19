@@ -1,0 +1,34 @@
+@fib(%n: int): int {
+entry:
+    %a0 = const 0
+    %b0 = const 1
+    %i0 = const 0
+    jmp loop_cond
+
+loop_cond:
+    %cond0 = lt %i0, %n
+    br_if %cond0, loop_body, loop_end
+
+loop_body:
+    %tmp0 = add %a0, %b0
+    %a1 = %b0
+    %b1 = %tmp0
+    %i1 = add %i0, 1
+
+    %a0 = %a1
+    %b0 = %b1
+    %i0 = %i1
+
+    jmp loop_cond
+
+loop_end:
+    ret %a0
+}
+
+@main(): int {
+entry:
+    %n = const 10
+    %result = call fib(%n)
+    call puts(%result)
+    ret 0
+}

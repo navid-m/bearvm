@@ -254,6 +254,12 @@ const Emitter = struct {
                 try w.print("  jmp @loop{d}\n", .{lc});
                 try w.print("@lend{d}\n", .{lc});
             },
+            .label => |name| try w.print("@{s}\n", .{name}),
+            .jmp => |target| try w.print("  jmp @{s}\n", .{target}),
+            .br_if => |br| {
+                const cond_v = env[br.cond];
+                try w.print("  jnz {s}, @{s}, @{s}\n", .{ cond_v, br.true_label, br.false_label });
+            },
         }
     }
 
