@@ -51,4 +51,4 @@ BearVM is not intended as a general-purpose language runtime. Its primary role i
 
 # License
 
-Navid M (c) - GPL-3.0-only 
+Navid M (C) - GPL-3.0-only 
