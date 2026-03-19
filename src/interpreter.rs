@@ -9,7 +9,7 @@ pub enum Value {
     Str(String),
     Bool(bool),
     Ptr(Vec<u8>),
-    File(i64), // file descriptor index
+    File(i64),
     Void,
     Struct(String, HashMap<String, Value>),
 }
@@ -35,8 +35,10 @@ impl std::fmt::Display for Value {
 }
 
 struct Vm<'a> {
+    /// The program itself
     program: &'a Program,
-    // open file handles
+
+    /// The open file handles
     files: Vec<Option<FileHandle>>,
 }
 
@@ -180,7 +182,6 @@ impl<'a> Vm<'a> {
         arg_exprs: &[Expr],
         env: &HashMap<String, Value>,
     ) -> Result<Value, String> {
-        // evaluate args first
         let mut args = Vec::new();
         for a in arg_exprs {
             args.push(self.eval_expr(a, env)?);
@@ -265,7 +266,6 @@ impl<'a> Vm<'a> {
                 Ok(Value::Void)
             }
             _ => {
-                // user-defined function
                 let func = self
                     .program
                     .functions
