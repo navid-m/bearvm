@@ -8,15 +8,7 @@ BearVM is designed to support the execution needs of Axe, a language focused on 
 
 ## Core Characteristics
 
-BearVM uses a minimal, register-based intermediate representation with explicit basic blocks, phi nodes (in SSA form), and straightforward control flow. The IR includes support for:
-
-- Typed function parameters and return values  
-- Arithmetic, comparison, and bitwise operations  
-- Constant folding at the IR level where possible  
-- Function calls, including to external C functions  
-- Structured data types with named fields  
-- Dynamic allocation  
-- Concurrency operations: `spawn` to launch asynchronous function calls and `sync` to wait for and retrieve results  
+BearVM uses a minimal, register-based intermediate representation with explicit basic blocks, phi nodes (in SSA form), and straightforward control flow. The IR includes support for concurrency operations: `spawn` to launch asynchronous function calls and `sync` to wait for and retrieve results.
 
 These features allow Axe programs that use parallelism (recursive divide-and-conquer, task-based decomposition, producer-consumer patterns) to be expressed naturally and compiled efficiently.
 
