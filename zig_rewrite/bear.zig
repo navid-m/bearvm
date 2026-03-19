@@ -6,14 +6,10 @@ const bear_io = @import("io.zig");
 const bear_parser = @import("parser.zig");
 const bear_vm = @import("vm.zig");
 
-const List = std.ArrayList;
-
-pub const Allocator = std.mem.Allocator;
-
 pub var stdout_buf: [65536]u8 = undefined;
 pub var stdout_pos: usize = 0;
 
-fn run(program: *const lexer.Program, alloc: Allocator) !void {
+fn run(program: *const lexer.Program, alloc: std.mem.Allocator) !void {
     var vm = bear_vm.Vm.init(program, alloc);
     const main_fn = vm.findFunc("main") orelse return error.NoMainFunction;
     const env = try alloc.alloc(bear_vm.Value, main_fn.n_regs);
@@ -54,17 +50,17 @@ pub fn main() !void {
     };
 }
 
-fn testLex(src: []const u8, alloc: Allocator) ![]lexer.Token {
+fn testLex(src: []const u8, alloc: std.mem.Allocator) ![]lexer.Token {
     var list = try lexer.tokenize(src, alloc);
     return list.toOwnedSlice(alloc);
 }
 
-fn testParse(src: []const u8, alloc: Allocator) !lexer.Program {
+fn testParse(src: []const u8, alloc: std.mem.Allocator) !lexer.Program {
     const list = try lexer.tokenize(src, alloc);
     return bear_parser.parse(list.items, alloc);
 }
 
-fn evalMain(src: []const u8, alloc: Allocator) !bear_vm.Value {
+fn evalMain(src: []const u8, alloc: std.mem.Allocator) !bear_vm.Value {
     const list = try lexer.tokenize(src, alloc);
     const prog = try bear_parser.parse(list.items, alloc);
     var vm = bear_vm.Vm.init(&prog, alloc);

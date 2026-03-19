@@ -99,7 +99,7 @@ pub fn keywordToken(word: []const u8) ?Token {
     return null;
 }
 
-pub fn tokenize(src: []const u8, alloc: bear_main.Allocator) !std.ArrayList(Token) {
+pub fn tokenize(src: []const u8, alloc: std.mem.Allocator) !std.ArrayList(Token) {
     var tokens = try std.ArrayList(Token).initCapacity(alloc, src.len / 4 + 8);
     var i: usize = 0;
     while (i < src.len) {
@@ -251,7 +251,7 @@ pub const ExprSlab = struct {
     buf: []Expr,
     used: usize,
 
-    pub fn init(alloc: bear_main.Allocator, cap: usize) !ExprSlab {
+    pub fn init(alloc: std.mem.Allocator, cap: usize) !ExprSlab {
         return .{ .buf = try alloc.alloc(Expr, cap), .used = 0 };
     }
 
