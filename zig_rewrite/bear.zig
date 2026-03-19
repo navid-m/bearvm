@@ -102,6 +102,7 @@ pub fn main() !void {
 fn printUsage() void {
     std.debug.print(
         \\Usage:
+        \\
         \\  bear <file.bear>              Run via interpreter
         \\  bear --ast <file.bear>        Print AST as unicode tree
         \\  bear --jit <file.bear>        JIT compile and run (requires clang)
@@ -109,7 +110,7 @@ fn printUsage() void {
         \\  bear qbe <file.bear> -c       Compile with QBE + cc
         \\  bear llvm <file.bear>         Emit LLVM IR
         \\  bear llvm <file.bear> -c      Compile with llc + cc
-        \\
+        \\  bear version                  Show version and quit
     , .{});
 }
 
