@@ -1,6 +1,6 @@
 const std = @import("std");
 const lexer = @import("lexer.zig");
-const bear_io = @import("bear_io.zig");
+const bear_io = @import("io.zig");
 
 pub const Value = union(enum) {
     int: i64,

@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const lexer = @import("lexer.zig");
-const bear_io = @import("bear_io.zig");
+const bear_io = @import("io.zig");
 const bear_parser = @import("parser.zig");
 const bear_vm = @import("vm.zig");
 
