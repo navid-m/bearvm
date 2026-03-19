@@ -9,3 +9,9 @@ name = "bear"
 path = "src/main.rs"
 
 [dependencies]
+rustc-hash = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

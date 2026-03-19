@@ -1,7 +1,9 @@
 use crate::ast::*;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+
+type Env = FxHashMap<String, Value>;
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -11,7 +13,7 @@ pub enum Value {
     Ptr(Vec<u8>),
     File(i64),
     Void,
-    Struct(String, HashMap<String, Value>),
+    Struct(String, FxHashMap<String, Value>),
 }
 
 impl std::fmt::Display for Value {
@@ -70,7 +72,7 @@ impl<'a> Vm<'a> {
         (self.files.len() - 1) as i64
     }
 
-    fn eval_expr(&mut self, expr: &Expr, env: &HashMap<String, Value>) -> Result<Value, String> {
+    fn eval_expr(&mut self, expr: &Expr, env: &Env) -> Result<Value, String> {
         match expr {
             Expr::Int(n) => Ok(Value::Int(*n)),
             Expr::Str(s) => Ok(Value::Str(s.clone())),
@@ -157,7 +159,7 @@ impl<'a> Vm<'a> {
                 Ok(Value::Ptr(vec![0u8; size]))
             }
             Expr::StructLit(name, field_exprs) => {
-                let mut fields = HashMap::new();
+                let mut fields = FxHashMap::default();
                 for (fname, fexpr) in field_exprs {
                     let val = self.eval_expr(fexpr, env)?;
                     fields.insert(fname.clone(), val);
@@ -177,7 +179,7 @@ impl<'a> Vm<'a> {
         &mut self,
         name: &str,
         arg_exprs: &[Expr],
-        env: &HashMap<String, Value>,
+        env: &Env,
     ) -> Result<Value, String> {
         let mut args = Vec::new();
         for a in arg_exprs {
@@ -271,7 +273,7 @@ impl<'a> Vm<'a> {
                     .ok_or_else(|| format!("Undefined function: {name}"))?
                     .clone();
 
-                let mut new_env: HashMap<String, Value> = HashMap::new();
+                let mut new_env: Env = FxHashMap::default();
                 for ((pname, _), val) in func.params.iter().zip(args.into_iter()) {
                     new_env.insert(pname.clone(), val);
                 }
@@ -288,7 +290,7 @@ impl<'a> Vm<'a> {
     fn exec_body(
         &mut self,
         stmts: &[Stmt],
-        env: &mut HashMap<String, Value>,
+        env: &mut Env,
     ) -> Result<Option<Value>, String> {
         for stmt in stmts {
             if let Some(v) = self.exec_stmt(stmt, env)? {
@@ -301,7 +303,7 @@ impl<'a> Vm<'a> {
     fn exec_stmt(
         &mut self,
         stmt: &Stmt,
-        env: &mut HashMap<String, Value>,
+        env: &mut Env,
     ) -> Result<Option<Value>, String> {
         match stmt {
             Stmt::Assign(reg, expr) => {
@@ -320,7 +322,7 @@ impl<'a> Vm<'a> {
                 Ok(None)
             }
             Stmt::Call(name, args) => {
-                self.call_func(name, args, &env.clone())?;
+                self.call_func(name, args, env)?;
                 Ok(None)
             }
             Stmt::Ret(expr) => {
@@ -354,7 +356,7 @@ pub fn run(program: &Program) -> Result<(), String> {
         .ok_or("No @main function found")?
         .clone();
 
-    let mut env = HashMap::new();
+    let mut env = Env::default();
     vm.exec_body(&main.body, &mut env)?;
     Ok(())
 }
@@ -376,7 +378,7 @@ mod tests {
         let program = parse(tokens).unwrap();
         let mut vm = Vm::new(&program);
         let main = vm.find_func("main").unwrap().clone();
-        let mut env = HashMap::new();
+        let mut env = Env::default();
         vm.exec_body(&main.body, &mut env)
             .unwrap()
             .unwrap_or(Value::Void)
@@ -424,7 +426,7 @@ mod tests {
         let program = parse(tokens).unwrap();
         let mut vm = Vm::new(&program);
         let main = vm.find_func("main").unwrap().clone();
-        let mut env = HashMap::new();
+        let mut env = Env::default();
         assert!(vm.exec_body(&main.body, &mut env).is_err());
     }
 
@@ -529,7 +531,7 @@ struct Point { x: int y: int }
         let program = parse(tokens).unwrap();
         let mut vm = Vm::new(&program);
         let main = vm.find_func("main").unwrap().clone();
-        let mut env = HashMap::new();
+        let mut env = Env::default();
         assert!(vm.exec_body(&main.body, &mut env).is_err());
     }
 
