@@ -57,3 +57,6 @@ No API or file format stability is guaranteed at this time.
 
 BearVM is not intended as a general-purpose language runtime. Its primary role is to serve as an efficient, concurrency-aware execution layer for the Axe compiler. Other front-ends may target BearVM in the future, but the design decisions (instruction selection, concurrency model, calling convention) are guided by Axe's requirements for expressing and executing highly parallel programs.
 
+# License
+
+Navid M (c) - GPL-3.0-only 
