@@ -2,10 +2,7 @@ const std = @import("std");
 const lexer = @import("lexer.zig");
 const bear_io = @import("io.zig");
 
-// --- Task table for spawn/sync ---
-
 const TaskState = enum { running, done };
-
 const Task = struct {
     thread: std.Thread,
     state: TaskState,
@@ -26,7 +23,6 @@ pub const TaskTable = struct {
         self.tasks.deinit(self.alloc);
     }
 
-    /// Reserve a slot and return its ID (index). Caller fills in the thread after spawning.
     pub fn reserve(self: *TaskTable) !u32 {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -49,16 +45,12 @@ pub const TaskTable = struct {
     pub fn complete(self: *TaskTable, id: u32, result: Value, err: ?anyerror) void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        // Simple values (int, bool, void) are safe to copy directly.
-        // For this VM, spawned tasks return numeric results (fib returns int).
         self.tasks.items[id].result = result;
         self.tasks.items[id].err = err;
         self.tasks.items[id].state = .done;
     }
 
-    /// Join the thread and return the result (blocks until done).
     pub fn join(self: *TaskTable, id: u32) !Value {
-        // Grab the thread handle (it's set before we can call join)
         self.mutex.lock();
         const thread = self.tasks.items[id].thread;
         self.mutex.unlock();
@@ -71,8 +63,6 @@ pub const TaskTable = struct {
     }
 };
 
-// --- Thread entry point ---
-
 const SpawnArgs = struct {
     program: *const lexer.Program,
     func_name: []const u8,
@@ -83,7 +73,6 @@ const SpawnArgs = struct {
 };
 
 fn spawnEntry(sa: *SpawnArgs) void {
-    // Each spawned task gets its own arena so allocations are thread-safe
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -121,7 +110,7 @@ pub fn run(program: *const lexer.Program, alloc: std.mem.Allocator) !void {
         alloc.free(env);
     }
     @memset(env, .void_);
-    _ = try vm.execBody(main_fn.body.items, env);
+    _ = try vm.execBody(main_fn.body.items, env, vm.getLabelMap("main"));
 }
 
 pub const Value = union(enum) {
@@ -161,21 +150,39 @@ const builtin_map = std.StaticStringMap(BuiltinTag).initComptime(.{
     .{ "close", .close },
 });
 
+/// Pre-built label map for a function body (label name -> statement index).
+const LabelMap = std.StringHashMapUnmanaged(usize);
+
 pub const Vm = struct {
     program: *const lexer.Program,
+
+    /// Maps function name -> index in program.functions
     func_index: std.StringHashMapUnmanaged(u32),
+
+    /// Pre-built label maps for each function (indexed same as func_index values)
+    label_maps: []LabelMap,
     files: std.ArrayListUnmanaged(?FileHandle),
     alloc: std.mem.Allocator,
     tasks: ?*TaskTable,
 
     pub fn init(program: *const lexer.Program, alloc: std.mem.Allocator) !Vm {
+        const n = program.functions.items.len;
+
         var func_index = std.StringHashMapUnmanaged(u32){};
-        try func_index.ensureTotalCapacity(alloc, @intCast(program.functions.items.len));
+        try func_index.ensureTotalCapacity(alloc, @intCast(n));
         for (program.functions.items, 0..) |*f, i|
             func_index.putAssumeCapacity(f.name, @intCast(i));
+
+        const label_maps = try alloc.alloc(LabelMap, n);
+        for (label_maps) |*lm| lm.* = .{};
+        for (program.functions.items, 0..) |*f, i| {
+            try buildLabelMap(&label_maps[i], f.body.items, alloc);
+        }
+
         return .{
             .program = program,
             .func_index = func_index,
+            .label_maps = label_maps,
             .files = .empty,
             .alloc = alloc,
             .tasks = null,
@@ -184,12 +191,19 @@ pub const Vm = struct {
 
     pub fn deinit(self: *Vm) void {
         self.func_index.deinit(self.alloc);
+        for (self.label_maps) |*lm| lm.deinit(self.alloc);
+        self.alloc.free(self.label_maps);
         self.files.deinit(self.alloc);
     }
 
     pub fn findFunc(self: *Vm, name: []const u8) ?*const lexer.Function {
         const idx = self.func_index.get(name) orelse return null;
         return &self.program.functions.items[idx];
+    }
+
+    pub fn getLabelMap(self: *Vm, name: []const u8) *const LabelMap {
+        const idx = self.func_index.get(name) orelse unreachable;
+        return &self.label_maps[idx];
     }
 
     fn allocFile(self: *Vm, handle: FileHandle) !i64 {
@@ -260,13 +274,11 @@ pub const Vm = struct {
                 },
                 .spawn => |s| {
                     const task_table = self.tasks orelse return error.NoTaskTable;
-                    // Evaluate args in the current thread
                     var args_buf: [32]Value = undefined;
                     const argc = s.args.items.len;
                     if (argc > 32) return error.TooManyArguments;
                     for (s.args.items, 0..) |a, i|
                         args_buf[i] = try self.evalExpr(a, env);
-                    // Copy args to heap for the new thread
                     const args_heap = try self.alloc.alloc(Value, argc);
                     @memcpy(args_heap, args_buf[0..argc]);
 
@@ -325,7 +337,6 @@ pub const Vm = struct {
     }
 
     pub fn callFuncWithValues(self: *Vm, name: []const u8, args: []Value) anyerror!Value {
-
         if (builtin_map.get(name)) |tag| {
             return switch (tag) {
                 .puts => blk: {
@@ -386,6 +397,8 @@ pub const Vm = struct {
 
         const idx = self.func_index.get(name) orelse return error.UndefinedFunction;
         const func = &self.program.functions.items[idx];
+        const label_map = &self.label_maps[idx];
+
         var stack_env: [32]Value = undefined;
         const new_env: []Value = if (func.n_regs <= 32) blk: {
             @memset(stack_env[0..func.n_regs], .void_);
@@ -403,16 +416,10 @@ pub const Vm = struct {
         for (func.params.items, 0..) |param, i|
             new_env[param.idx] = args[i];
 
-        return (try self.execBody(func.body.items, new_env)) orelse .void_;
+        return (try self.execBody(func.body.items, new_env, label_map)) orelse .void_;
     }
 
-    pub fn execBody(self: *Vm, stmts: []const lexer.Stmt, env: []Value) anyerror!?Value {
-        var label_map = std.StringHashMap(usize).init(self.alloc);
-        defer label_map.deinit();
-        for (stmts, 0..) |*stmt, i| {
-            if (stmt.* == .label) try label_map.put(stmt.label, i);
-        }
-
+    pub fn execBody(self: *Vm, stmts: []const lexer.Stmt, env: []Value, label_map: *const LabelMap) anyerror!?Value {
         var pc: usize = 0;
         while (pc < stmts.len) {
             const stmt = &stmts[pc];
@@ -432,6 +439,11 @@ pub const Vm = struct {
                 },
                 .ret => |e| return try self.evalExpr(e, env),
                 .while_ => |w| {
+                    var body_lm = LabelMap{};
+                    defer body_lm.deinit(self.alloc);
+                    try buildLabelMap(&body_lm, w.body.items, self.alloc);
+
+                    const body = w.body.items;
                     while (true) {
                         const keep = switch (try self.evalExpr(w.cond, env)) {
                             .bool_ => |b| b,
@@ -439,7 +451,44 @@ pub const Vm = struct {
                             else => return error.TypeMismatch,
                         };
                         if (!keep) break;
-                        if (try self.execBody(w.body.items, env)) |v| return v;
+
+                        var bpc: usize = 0;
+                        while (bpc < body.len) {
+                            const bs = &body[bpc];
+                            switch (bs.*) {
+                                .assign => |a| {
+                                    env[a.reg] = try self.evalExpr(a.expr, env);
+                                    bpc += 1;
+                                },
+                                .set_field => |sf| {
+                                    const val = try self.evalExpr(sf.expr, env);
+                                    try env[sf.reg].struct_.fields.put(sf.field, val);
+                                    bpc += 1;
+                                },
+                                .call => |c| {
+                                    _ = try self.callFunc(c.name, c.args.items, env);
+                                    bpc += 1;
+                                },
+                                .ret => |e| return try self.evalExpr(e, env),
+                                .while_ => {
+                                    if (try self.execBody(body[bpc .. bpc + 1], env, &body_lm)) |v| return v;
+                                    bpc += 1;
+                                },
+                                .label => bpc += 1,
+                                .jmp => |target| {
+                                    bpc = body_lm.get(target) orelse return error.UndefinedLabel;
+                                },
+                                .br_if => |br| {
+                                    const taken = switch (env[br.cond]) {
+                                        .bool_ => |b| b,
+                                        .int => |n| n != 0,
+                                        else => return error.TypeMismatch,
+                                    };
+                                    const target = if (taken) br.true_label else br.false_label;
+                                    bpc = body_lm.get(target) orelse return error.UndefinedLabel;
+                                },
+                            }
+                        }
                     }
                     pc += 1;
                 },
@@ -462,3 +511,10 @@ pub const Vm = struct {
         return null;
     }
 };
+
+/// Build a label->index map for a flat statement list.
+fn buildLabelMap(lm: *LabelMap, stmts: []const lexer.Stmt, alloc: std.mem.Allocator) !void {
+    for (stmts, 0..) |*s, i| {
+        if (s.* == .label) try lm.put(alloc, s.label, i);
+    }
+}

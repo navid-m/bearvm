@@ -195,7 +195,7 @@ fn evalMain(src: []const u8, alloc: std.mem.Allocator) !bear_vm.Value {
         alloc.free(env);
     }
     @memset(env, .void_);
-    return (try vm.execBody(main_fn.body.items, env)) orelse .void_;
+    return (try vm.execBody(main_fn.body.items, env, vm.getLabelMap("main"))) orelse .void_;
 }
 
 test "lexer: empty input yields only eof" {
