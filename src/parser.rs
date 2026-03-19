@@ -60,9 +60,12 @@ impl Parser {
         }
     }
 
-    /// Parse a comma-separated argument list inside parens: (arg, arg, ...)
+    /// Parse an optional argument list. Parens are optional — `call foo` is valid.
     fn parse_args(&mut self) -> Result<Vec<Expr>, String> {
-        self.expect(&Token::LParen)?;
+        if self.peek() != &Token::LParen {
+            return Ok(Vec::new());
+        }
+        self.advance();
         let mut args = Vec::new();
         while self.peek() != &Token::RParen {
             args.push(self.parse_expr()?);
