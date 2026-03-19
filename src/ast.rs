@@ -1,3 +1,6 @@
+/// Register index — assigned at parse time, eliminating all HashMap lookups at runtime.
+pub type RegIdx = u16;
+
 /// Top-level program
 #[derive(Debug, Clone)]
 pub struct Program {
@@ -16,9 +19,12 @@ pub struct StructDef {
 #[derive(Debug, Clone)]
 pub struct Function {
     pub name: String,
-    pub params: Vec<(String, Ty)>,
+    /// (param_name, type, reg_idx)
+    pub params: Vec<(String, Ty, RegIdx)>,
     pub ret_ty: Ty,
     pub body: Vec<Stmt>,
+    /// Total number of registers used in this function
+    pub n_regs: u16,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,10 +51,10 @@ impl std::fmt::Display for Ty {
 #[derive(Debug, Clone)]
 pub enum Stmt {
     /// %r = <expr>
-    Assign(String, Expr),
+    Assign(RegIdx, Expr),
 
     /// set %r.field = <expr>
-    SetField(String, String, Expr),
+    SetField(RegIdx, String, Expr),
 
     /// call <func>(<args>)  — result discarded
     Call(String, Vec<Expr>),
@@ -68,11 +74,11 @@ pub enum Expr {
     /// string literal
     Str(String),
 
-    /// register reference %r
-    Reg(String),
+    /// register reference %r  (index into frame)
+    Reg(RegIdx),
 
     /// field access %r.field
-    Field(String, String),
+    Field(RegIdx, String),
 
     /// const <val>
     Const(Box<Expr>),
@@ -150,6 +156,7 @@ mod tests {
             params: vec![],
             ret_ty: Ty::Int,
             body: vec![Stmt::Ret(Expr::Int(0))],
+            n_regs: 0,
         };
         assert_eq!(f.name, "main");
         assert!(f.params.is_empty());
@@ -161,7 +168,7 @@ mod tests {
     fn expr_variants_are_cloneable() {
         let e = Expr::Add(Box::new(Expr::Int(1)), Box::new(Expr::Int(2)));
         let _ = e.clone();
-        let e2 = Expr::Field("p".into(), "name".into());
+        let e2 = Expr::Field(0, "name".into());
         let _ = e2.clone();
     }
 }

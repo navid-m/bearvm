@@ -6,6 +6,32 @@ struct Parser {
     pos: usize,
 }
 
+/// Per-function register name → index map, built during parsing.
+struct RegMap {
+    names: Vec<String>,
+}
+
+impl RegMap {
+    fn new() -> Self {
+        RegMap { names: Vec::new() }
+    }
+
+    fn intern(&mut self, name: &str) -> RegIdx {
+        for (i, n) in self.names.iter().enumerate() {
+            if n == name {
+                return i as RegIdx;
+            }
+        }
+        let idx = self.names.len() as RegIdx;
+        self.names.push(name.to_owned());
+        idx
+    }
+
+    fn count(&self) -> u16 {
+        self.names.len() as u16
+    }
+}
+
 impl Parser {
     fn peek(&self) -> &Token {
         &self.tokens[self.pos]
@@ -60,15 +86,14 @@ impl Parser {
         }
     }
 
-    /// Parse an optional argument list. Parens are optional — `call foo` is valid.
-    fn parse_args(&mut self) -> Result<Vec<Expr>, String> {
+    fn parse_args(&mut self, rm: &mut RegMap) -> Result<Vec<Expr>, String> {
         if self.peek() != &Token::LParen {
             return Ok(Vec::new());
         }
         self.advance();
         let mut args = Vec::new();
         while self.peek() != &Token::RParen {
-            args.push(self.parse_expr()?);
+            args.push(self.parse_expr(rm)?);
             if self.peek() == &Token::Comma {
                 self.advance();
             }
@@ -77,60 +102,60 @@ impl Parser {
         Ok(args)
     }
 
-    fn parse_expr(&mut self) -> Result<Expr, String> {
+    fn parse_expr(&mut self, rm: &mut RegMap) -> Result<Expr, String> {
         match self.peek().clone() {
             Token::Const => {
                 self.advance();
-                let inner = self.parse_expr()?;
+                let inner = self.parse_expr(rm)?;
                 Ok(Expr::Const(Box::new(inner)))
             }
             Token::Add => {
                 self.advance();
-                let a = self.parse_expr()?;
+                let a = self.parse_expr(rm)?;
                 self.expect(&Token::Comma)?;
-                let b = self.parse_expr()?;
+                let b = self.parse_expr(rm)?;
                 Ok(Expr::Add(Box::new(a), Box::new(b)))
             }
             Token::Sub => {
                 self.advance();
-                let a = self.parse_expr()?;
+                let a = self.parse_expr(rm)?;
                 self.expect(&Token::Comma)?;
-                let b = self.parse_expr()?;
+                let b = self.parse_expr(rm)?;
                 Ok(Expr::Sub(Box::new(a), Box::new(b)))
             }
             Token::Mul => {
                 self.advance();
-                let a = self.parse_expr()?;
+                let a = self.parse_expr(rm)?;
                 self.expect(&Token::Comma)?;
-                let b = self.parse_expr()?;
+                let b = self.parse_expr(rm)?;
                 Ok(Expr::Mul(Box::new(a), Box::new(b)))
             }
             Token::Div => {
                 self.advance();
-                let a = self.parse_expr()?;
+                let a = self.parse_expr(rm)?;
                 self.expect(&Token::Comma)?;
-                let b = self.parse_expr()?;
+                let b = self.parse_expr(rm)?;
                 Ok(Expr::Div(Box::new(a), Box::new(b)))
             }
             Token::Lt => {
                 self.advance();
-                let a = self.parse_expr()?;
+                let a = self.parse_expr(rm)?;
                 self.expect(&Token::Comma)?;
-                let b = self.parse_expr()?;
+                let b = self.parse_expr(rm)?;
                 Ok(Expr::Lt(Box::new(a), Box::new(b)))
             }
             Token::Gt => {
                 self.advance();
-                let a = self.parse_expr()?;
+                let a = self.parse_expr(rm)?;
                 self.expect(&Token::Comma)?;
-                let b = self.parse_expr()?;
+                let b = self.parse_expr(rm)?;
                 Ok(Expr::Gt(Box::new(a), Box::new(b)))
             }
             Token::Eq => {
                 self.advance();
-                let a = self.parse_expr()?;
+                let a = self.parse_expr(rm)?;
                 self.expect(&Token::Comma)?;
-                let b = self.parse_expr()?;
+                let b = self.parse_expr(rm)?;
                 Ok(Expr::Eq(Box::new(a), Box::new(b)))
             }
             Token::Call => {
@@ -140,36 +165,33 @@ impl Parser {
                     Token::Func(s) => s,
                     t => return Err(format!("Expected function name after call, got {t:?}")),
                 };
-                let args = self.parse_args()?;
+                let args = self.parse_args(rm)?;
                 Ok(Expr::Call(name, args))
             }
             Token::Alloc => {
                 self.advance();
-                let size = self.parse_expr()?;
+                let size = self.parse_expr(rm)?;
                 Ok(Expr::Alloc(Box::new(size)))
             }
             Token::Int(n) => {
-                let n = n;
                 self.advance();
                 Ok(Expr::Int(n))
             }
             Token::Str(s) => {
-                let s = s.clone();
                 self.advance();
                 Ok(Expr::Str(s))
             }
             Token::Reg(r) => {
-                let r = r.clone();
                 self.advance();
+                let idx = rm.intern(&r);
                 if self.peek() == &Token::Dot {
                     self.advance();
                     let field = self.expect_ident()?;
-                    return Ok(Expr::Field(r, field));
+                    return Ok(Expr::Field(idx, field));
                 }
-                Ok(Expr::Reg(r))
+                Ok(Expr::Reg(idx))
             }
             Token::Ident(name) => {
-                let name = name.clone();
                 self.advance();
                 if self.peek() == &Token::LBrace {
                     self.advance();
@@ -177,7 +199,7 @@ impl Parser {
                     while self.peek() != &Token::RBrace {
                         let fname = self.expect_ident()?;
                         self.expect(&Token::Colon)?;
-                        let val = self.parse_expr()?;
+                        let val = self.parse_expr(rm)?;
                         fields.push((fname, val));
                     }
                     self.expect(&Token::RBrace)?;
@@ -189,23 +211,24 @@ impl Parser {
         }
     }
 
-    fn parse_stmt(&mut self) -> Result<Stmt, String> {
+    fn parse_stmt(&mut self, rm: &mut RegMap) -> Result<Stmt, String> {
         match self.peek().clone() {
             Token::Reg(r) => {
-                let r = r.clone();
                 self.advance();
+                let idx = rm.intern(&r);
                 self.expect(&Token::Assign)?;
-                let expr = self.parse_expr()?;
-                Ok(Stmt::Assign(r, expr))
+                let expr = self.parse_expr(rm)?;
+                Ok(Stmt::Assign(idx, expr))
             }
             Token::Set => {
                 self.advance();
                 let r = self.expect_reg()?;
+                let idx = rm.intern(&r);
                 self.expect(&Token::Dot)?;
                 let field = self.expect_ident()?;
                 self.expect(&Token::Assign)?;
-                let expr = self.parse_expr()?;
-                Ok(Stmt::SetField(r, field, expr))
+                let expr = self.parse_expr(rm)?;
+                Ok(Stmt::SetField(idx, field, expr))
             }
             Token::Call => {
                 self.advance();
@@ -214,23 +237,23 @@ impl Parser {
                     Token::Func(s) => s,
                     t => return Err(format!("Expected function name after call, got {t:?}")),
                 };
-                let args = self.parse_args()?;
+                let args = self.parse_args(rm)?;
                 Ok(Stmt::Call(name, args))
             }
             Token::Ret => {
                 self.advance();
-                let expr = self.parse_expr()?;
+                let expr = self.parse_expr(rm)?;
                 Ok(Stmt::Ret(expr))
             }
             Token::While => {
                 self.advance();
                 self.expect(&Token::LParen)?;
-                let cond = self.parse_expr()?;
+                let cond = self.parse_expr(rm)?;
                 self.expect(&Token::RParen)?;
                 self.expect(&Token::LBrace)?;
                 let mut body = Vec::new();
                 while self.peek() != &Token::RBrace {
-                    body.push(self.parse_stmt()?);
+                    body.push(self.parse_stmt(rm)?);
                 }
                 self.expect(&Token::RBrace)?;
                 Ok(Stmt::While(cond, body))
@@ -256,6 +279,7 @@ impl Parser {
 
     fn parse_function(&mut self) -> Result<Function, String> {
         let name = self.expect_func()?;
+        let mut rm = RegMap::new();
         let mut params = Vec::new();
 
         if self.peek() == &Token::LParen {
@@ -264,7 +288,8 @@ impl Parser {
                 let pname = self.expect_reg()?;
                 self.expect(&Token::Colon)?;
                 let ty = self.parse_ty()?;
-                params.push((pname, ty));
+                let idx = rm.intern(&pname);
+                params.push((pname, ty, idx));
                 if self.peek() == &Token::Comma {
                     self.advance();
                 }
@@ -282,16 +307,12 @@ impl Parser {
         self.expect(&Token::LBrace)?;
         let mut body = Vec::new();
         while self.peek() != &Token::RBrace {
-            body.push(self.parse_stmt()?);
+            body.push(self.parse_stmt(&mut rm)?);
         }
         self.expect(&Token::RBrace)?;
 
-        Ok(Function {
-            name,
-            params,
-            ret_ty,
-            body,
-        })
+        let n_regs = rm.count();
+        Ok(Function { name, params, ret_ty, body, n_regs })
     }
 
     fn parse_program(&mut self) -> Result<Program, String> {
@@ -359,13 +380,13 @@ mod tests {
     #[test]
     fn assign_const_int() {
         let p = parse_src("@main(): int { %x = const 42 ret 0 }");
-        assert!(matches!(&p.functions[0].body[0], Stmt::Assign(r, _) if r == "x"));
+        assert!(matches!(&p.functions[0].body[0], Stmt::Assign(_, _)));
     }
 
     #[test]
     fn assign_add() {
         let p = parse_src("@main(): int { %r = add %a, %b ret 0 }");
-        assert!(matches!(&p.functions[0].body[0], Stmt::Assign(r, Expr::Add(..)) if r == "r"));
+        assert!(matches!(&p.functions[0].body[0], Stmt::Assign(_, Expr::Add(..))));
     }
 
     #[test]
@@ -377,17 +398,13 @@ mod tests {
     #[test]
     fn set_field() {
         let p = parse_src("@main(): int { set %p.age = const 1 ret 0 }");
-        assert!(
-            matches!(&p.functions[0].body[0], Stmt::SetField(r, f, _) if r == "p" && f == "age")
-        );
+        assert!(matches!(&p.functions[0].body[0], Stmt::SetField(_, f, _) if f == "age"));
     }
 
     #[test]
     fn field_access_expr() {
         let p = parse_src("@main(): int { %v = %p.name ret 0 }");
-        assert!(
-            matches!(&p.functions[0].body[0], Stmt::Assign(_, Expr::Field(r, f)) if r == "p" && f == "name")
-        );
+        assert!(matches!(&p.functions[0].body[0], Stmt::Assign(_, Expr::Field(_, f)) if f == "name"));
     }
 
     #[test]

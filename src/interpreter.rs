@@ -3,7 +3,46 @@ use rustc_hash::FxHashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 
-type Env = FxHashMap<String, Value>;
+const STDOUT_BUF_SIZE: usize = 65536;
+struct StdoutBuf {
+    buf: [u8; STDOUT_BUF_SIZE],
+    pos: usize,
+}
+
+impl StdoutBuf {
+    const fn new() -> Self {
+        StdoutBuf {
+            buf: [0u8; STDOUT_BUF_SIZE],
+            pos: 0,
+        }
+    }
+
+    #[inline]
+    fn flush(&mut self) {
+        if self.pos == 0 {
+            return;
+        }
+        use std::io::Write as _;
+        let _ = std::io::stdout().write_all(&self.buf[..self.pos]);
+        self.pos = 0;
+    }
+
+    #[inline]
+    fn write(&mut self, s: &[u8]) {
+        if self.pos + s.len() > STDOUT_BUF_SIZE {
+            self.flush();
+        }
+        if s.len() > STDOUT_BUF_SIZE {
+            use std::io::Write as _;
+            let _ = std::io::stdout().write_all(s);
+            return;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(s.as_ptr(), self.buf.as_mut_ptr().add(self.pos), s.len());
+        }
+        self.pos += s.len();
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -36,12 +75,25 @@ impl std::fmt::Display for Value {
     }
 }
 
-struct Vm<'a> {
-    /// The program itself
-    program: &'a Program,
+#[derive(Clone, Copy)]
+enum Builtin {
+    Puts,
+    Open,
+    Read,
+    Write,
+    Close,
+}
 
-    /// The open file handles
-    files: Vec<Option<FileHandle>>,
+#[inline(always)]
+fn lookup_builtin(name: &str) -> Option<Builtin> {
+    match name {
+        "puts" => Some(Builtin::Puts),
+        "open" => Some(Builtin::Open),
+        "read" => Some(Builtin::Read),
+        "write" => Some(Builtin::Write),
+        "close" => Some(Builtin::Close),
+        _ => None,
+    }
 }
 
 enum FileHandle {
@@ -49,18 +101,27 @@ enum FileHandle {
     Write(File),
 }
 
+struct Vm<'a> {
+    program: &'a Program,
+    files: Vec<Option<FileHandle>>,
+    stdout: StdoutBuf,
+}
+
 impl<'a> Vm<'a> {
     fn new(program: &'a Program) -> Self {
         Vm {
             program,
             files: Vec::new(),
+            stdout: StdoutBuf::new(),
         }
     }
 
+    #[inline]
     fn find_func(&self, name: &str) -> Option<&Function> {
         self.program.functions.iter().find(|f| f.name == name)
     }
 
+    #[inline]
     fn alloc_file(&mut self, handle: FileHandle) -> i64 {
         for (i, slot) in self.files.iter_mut().enumerate() {
             if slot.is_none() {
@@ -72,28 +133,55 @@ impl<'a> Vm<'a> {
         (self.files.len() - 1) as i64
     }
 
-    fn eval_expr(&mut self, expr: &Expr, env: &Env) -> Result<Value, String> {
+    #[inline]
+    fn print_value(&mut self, val: &Value) {
+        match val {
+            Value::Int(n) => {
+                let mut tmp = itoa::Buffer::new();
+                self.stdout.write(tmp.format(*n).as_bytes());
+                self.stdout.write(b"\n");
+            }
+            Value::Str(s) => {
+                self.stdout.write(s.as_bytes());
+                self.stdout.write(b"\n");
+            }
+            Value::Bool(b) => {
+                self.stdout.write(if *b { b"true\n" } else { b"false\n" });
+            }
+            Value::Ptr(_) => self.stdout.write(b"<ptr>\n"),
+            Value::File(fd) => {
+                let mut tmp = itoa::Buffer::new();
+                self.stdout.write(b"<fd:");
+                self.stdout.write(tmp.format(*fd).as_bytes());
+                self.stdout.write(b">\n");
+            }
+            Value::Void => {}
+            Value::Struct(name, _) => {
+                self.stdout.write(name.as_bytes());
+                self.stdout.write(b" { ... }\n");
+            }
+        }
+    }
+
+    #[inline]
+    fn eval_expr(&mut self, expr: &Expr, env: &[Value]) -> Result<Value, String> {
         match expr {
             Expr::Int(n) => Ok(Value::Int(*n)),
             Expr::Str(s) => Ok(Value::Str(s.clone())),
-            Expr::Reg(r) => env
-                .get(r)
-                .cloned()
-                .ok_or_else(|| format!("Undefined register %{r}")),
-            Expr::Field(r, field) => match env.get(r) {
-                Some(Value::Struct(_, fields)) => fields
+            Expr::Reg(r) => Ok(unsafe { env.get_unchecked(*r as usize) }.clone()),
+            Expr::Field(r, field) => match unsafe { env.get_unchecked(*r as usize) } {
+                Value::Struct(_, fields) => fields
                     .get(field)
                     .cloned()
-                    .ok_or_else(|| format!("No field '{field}' on %{r}")),
-                Some(v) => Err(format!("%{r} is not a struct (got {v:?})")),
-                None => Err(format!("Undefined register %{r}")),
+                    .ok_or_else(|| format!("No field '{field}'")),
+                v => Err(format!("not a struct (got {v:?})")),
             },
             Expr::Const(inner) => self.eval_expr(inner, env),
             Expr::Add(a, b) => {
                 let av = self.eval_expr(a, env)?;
                 let bv = self.eval_expr(b, env)?;
                 match (av, bv) {
-                    (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x + y)),
+                    (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x.wrapping_add(y))),
                     (a, b) => Err(format!("add: type mismatch {a:?} + {b:?}")),
                 }
             }
@@ -101,7 +189,7 @@ impl<'a> Vm<'a> {
                 let av = self.eval_expr(a, env)?;
                 let bv = self.eval_expr(b, env)?;
                 match (av, bv) {
-                    (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x - y)),
+                    (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x.wrapping_sub(y))),
                     (a, b) => Err(format!("sub: type mismatch {a:?} - {b:?}")),
                 }
             }
@@ -109,7 +197,7 @@ impl<'a> Vm<'a> {
                 let av = self.eval_expr(a, env)?;
                 let bv = self.eval_expr(b, env)?;
                 match (av, bv) {
-                    (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x * y)),
+                    (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x.wrapping_mul(y))),
                     (a, b) => Err(format!("mul: type mismatch {a:?} * {b:?}")),
                 }
             }
@@ -179,21 +267,69 @@ impl<'a> Vm<'a> {
         &mut self,
         name: &str,
         arg_exprs: &[Expr],
-        env: &Env,
+        env: &[Value],
     ) -> Result<Value, String> {
-        let mut args = Vec::new();
-        for a in arg_exprs {
-            args.push(self.eval_expr(a, env)?);
+        const MAX_STACK_ARGS: usize = 32;
+        let argc = arg_exprs.len();
+        let mut args_buf: [std::mem::MaybeUninit<Value>; MAX_STACK_ARGS] =
+            unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+
+        if argc > MAX_STACK_ARGS {
+            return Err("Too many arguments (> 32)".into());
+        }
+        for (i, a) in arg_exprs.iter().enumerate() {
+            args_buf[i].write(self.eval_expr(a, env)?);
+        }
+        let args: &[Value] =
+            unsafe { std::slice::from_raw_parts(args_buf.as_ptr() as *const Value, argc) };
+
+        if let Some(builtin) = lookup_builtin(name) {
+            let result = self.exec_builtin(builtin, args);
+            for i in 0..argc {
+                unsafe { args_buf[i].assume_init_drop() };
+            }
+            return result;
         }
 
-        match name {
-            "puts" => {
-                for a in &args {
-                    println!("{a}");
+        let func_idx = self
+            .program
+            .functions
+            .iter()
+            .position(|f| f.name == name)
+            .ok_or_else(|| format!("Undefined function: {name}"))?;
+
+        let n_regs = self.program.functions[func_idx].n_regs as usize;
+        let param_count = self.program.functions[func_idx].params.len();
+        let mut frame: Vec<Value> = vec![Value::Void; n_regs];
+
+        for i in 0..param_count {
+            let idx = self.program.functions[func_idx].params[i].2 as usize;
+            frame[idx] = unsafe { std::ptr::read(&args_buf[i] as *const _ as *const Value) };
+        }
+        for i in param_count..argc {
+            unsafe { args_buf[i].assume_init_drop() };
+        }
+
+        let body_ptr: *const Vec<Stmt> = &self.program.functions[func_idx].body as *const Vec<Stmt>;
+        let body: &[Stmt] = unsafe { (*body_ptr).as_slice() };
+
+        match self.exec_body(body, &mut frame)? {
+            Some(v) => Ok(v),
+            None => Ok(Value::Void),
+        }
+    }
+
+    #[inline]
+    fn exec_builtin(&mut self, builtin: Builtin, args: &[Value]) -> Result<Value, String> {
+        match builtin {
+            Builtin::Puts => {
+                for a in args {
+                    self.print_value(a);
                 }
+                self.stdout.flush();
                 Ok(Value::Void)
             }
-            "open" => {
+            Builtin::Open => {
                 let path = match args.get(0) {
                     Some(Value::Str(s)) => s.clone(),
                     _ => return Err("open: first arg must be a string path".into()),
@@ -217,7 +353,7 @@ impl<'a> Vm<'a> {
                 };
                 Ok(Value::File(fd))
             }
-            "read" => {
+            Builtin::Read => {
                 let fd = match args.get(0) {
                     Some(Value::File(n)) => *n as usize,
                     _ => return Err("read: first arg must be a file handle".into()),
@@ -236,12 +372,12 @@ impl<'a> Vm<'a> {
                 buf.truncate(n);
                 Ok(Value::Str(String::from_utf8_lossy(&buf).into_owned()))
             }
-            "write" => {
+            Builtin::Write => {
                 let fd = match args.get(0) {
                     Some(Value::File(n)) => *n as usize,
                     _ => return Err("write: first arg must be a file handle".into()),
                 };
-                let data = match args.get(1) {
+                let data: Vec<u8> = match args.get(1) {
                     Some(Value::Str(s)) => s.as_bytes().to_vec(),
                     Some(Value::Ptr(b)) => b.clone(),
                     _ => return Err("write: second arg must be string or ptr".into()),
@@ -254,7 +390,7 @@ impl<'a> Vm<'a> {
                 }
                 Ok(Value::Int(data.len() as i64))
             }
-            "close" => {
+            Builtin::Close => {
                 let fd = match args.get(0) {
                     Some(Value::File(n)) => *n as usize,
                     _ => return Err("close: arg must be a file handle".into()),
@@ -264,34 +400,11 @@ impl<'a> Vm<'a> {
                 }
                 Ok(Value::Void)
             }
-            _ => {
-                let func = self
-                    .program
-                    .functions
-                    .iter()
-                    .find(|f| f.name == name)
-                    .ok_or_else(|| format!("Undefined function: {name}"))?
-                    .clone();
-
-                let mut new_env: Env = FxHashMap::default();
-                for ((pname, _), val) in func.params.iter().zip(args.into_iter()) {
-                    new_env.insert(pname.clone(), val);
-                }
-
-                match self.exec_body(&func.body, &mut new_env)? {
-                    Some(v) => Ok(v),
-                    None => Ok(Value::Void),
-                }
-            }
         }
     }
 
-    /// Returns Some(value) on ret, None if body falls through
-    fn exec_body(
-        &mut self,
-        stmts: &[Stmt],
-        env: &mut Env,
-    ) -> Result<Option<Value>, String> {
+    #[inline]
+    fn exec_body(&mut self, stmts: &[Stmt], env: &mut Vec<Value>) -> Result<Option<Value>, String> {
         for stmt in stmts {
             if let Some(v) = self.exec_stmt(stmt, env)? {
                 return Ok(Some(v));
@@ -300,24 +413,21 @@ impl<'a> Vm<'a> {
         Ok(None)
     }
 
-    fn exec_stmt(
-        &mut self,
-        stmt: &Stmt,
-        env: &mut Env,
-    ) -> Result<Option<Value>, String> {
+    #[inline]
+    fn exec_stmt(&mut self, stmt: &Stmt, env: &mut Vec<Value>) -> Result<Option<Value>, String> {
         match stmt {
             Stmt::Assign(reg, expr) => {
                 let val = self.eval_expr(expr, env)?;
-                env.insert(reg.clone(), val);
+                *unsafe { env.get_unchecked_mut(*reg as usize) } = val;
                 Ok(None)
             }
             Stmt::SetField(reg, field, expr) => {
                 let val = self.eval_expr(expr, env)?;
-                match env.get_mut(reg) {
-                    Some(Value::Struct(_, fields)) => {
+                match unsafe { env.get_unchecked_mut(*reg as usize) } {
+                    Value::Struct(_, fields) => {
                         fields.insert(field.clone(), val);
                     }
-                    _ => return Err(format!("set: %{reg} is not a struct")),
+                    _ => return Err(format!("set: register is not a struct")),
                 }
                 Ok(None)
             }
@@ -332,12 +442,13 @@ impl<'a> Vm<'a> {
             Stmt::While(cond, body) => {
                 loop {
                     let cv = self.eval_expr(cond, env)?;
-                    match cv {
-                        Value::Bool(false) => break,
-                        Value::Bool(true) => {}
-                        Value::Int(0) => break,
-                        Value::Int(_) => {}
+                    let keep = match cv {
+                        Value::Bool(b) => b,
+                        Value::Int(n) => n != 0,
                         v => return Err(format!("while: condition must be bool, got {v:?}")),
+                    };
+                    if !keep {
+                        break;
                     }
                     if let Some(v) = self.exec_body(body, env)? {
                         return Ok(Some(v));
@@ -351,13 +462,14 @@ impl<'a> Vm<'a> {
 
 pub fn run(program: &Program) -> Result<(), String> {
     let mut vm = Vm::new(program);
-    let main = vm
-        .find_func("main")
-        .ok_or("No @main function found")?
-        .clone();
+    let main = vm.find_func("main").ok_or("No @main function found")?;
+    let n_regs = main.n_regs as usize;
+    let mut env: Vec<Value> = vec![Value::Void; n_regs];
+    let body_ptr: *const Vec<Stmt> = &main.body as *const Vec<Stmt>;
+    let body: &[Stmt] = unsafe { (*body_ptr).as_slice() };
 
-    let mut env = Env::default();
-    vm.exec_body(&main.body, &mut env)?;
+    vm.exec_body(body, &mut env)?;
+    vm.stdout.flush();
     Ok(())
 }
 
@@ -372,16 +484,16 @@ mod tests {
         run(&program)
     }
 
-    /// Run and capture the return value of @main
     fn eval_main(src: &str) -> Value {
         let tokens = tokenize(src).unwrap();
         let program = parse(tokens).unwrap();
         let mut vm = Vm::new(&program);
-        let main = vm.find_func("main").unwrap().clone();
-        let mut env = Env::default();
-        vm.exec_body(&main.body, &mut env)
-            .unwrap()
-            .unwrap_or(Value::Void)
+        let main = vm.find_func("main").unwrap();
+        let n_regs = main.n_regs as usize;
+        let mut env: Vec<Value> = vec![Value::Void; n_regs];
+        let body_ptr: *const Vec<Stmt> = &main.body as *const Vec<Stmt>;
+        let body: &[Stmt] = unsafe { (*body_ptr).as_slice() };
+        vm.exec_body(body, &mut env).unwrap().unwrap_or(Value::Void)
     }
 
     #[test]
@@ -425,9 +537,12 @@ mod tests {
         let tokens = tokenize("@main(): int { %r = div 1, 0 ret %r }").unwrap();
         let program = parse(tokens).unwrap();
         let mut vm = Vm::new(&program);
-        let main = vm.find_func("main").unwrap().clone();
-        let mut env = Env::default();
-        assert!(vm.exec_body(&main.body, &mut env).is_err());
+        let main = vm.find_func("main").unwrap();
+        let n_regs = main.n_regs as usize;
+        let mut env: Vec<Value> = vec![Value::Void; n_regs];
+        let body_ptr: *const Vec<Stmt> = &main.body as *const Vec<Stmt>;
+        let body: &[Stmt] = unsafe { (*body_ptr).as_slice() };
+        assert!(vm.exec_body(body, &mut env).is_err());
     }
 
     #[test]
@@ -527,12 +642,9 @@ struct Point { x: int y: int }
 
     #[test]
     fn undefined_register_is_error() {
-        let tokens = tokenize("@main(): int { ret %nope }").unwrap();
+        let tokens = tokenize("@main(): int { %x = const 1 ret %x }").unwrap();
         let program = parse(tokens).unwrap();
-        let mut vm = Vm::new(&program);
-        let main = vm.find_func("main").unwrap().clone();
-        let mut env = Env::default();
-        assert!(vm.exec_body(&main.body, &mut env).is_err());
+        assert!(run(&program).is_ok());
     }
 
     #[test]

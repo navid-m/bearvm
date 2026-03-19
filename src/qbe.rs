@@ -61,7 +61,7 @@ impl Emitter {
     fn emit_expr(
         &mut self,
         expr: &Expr,
-        env: &HashMap<String, String>,
+        env: &[String],
         func_out: &mut String,
     ) -> Result<String, String> {
         match expr {
@@ -76,10 +76,10 @@ impl Emitter {
                 func_out.push_str(&format!("  %{t} =l copy ${label}\n"));
                 Ok(format!("%{t}"))
             }
-            Expr::Reg(r) => Ok(env.get(r).cloned().unwrap_or_else(|| format!("%{r}"))),
+            Expr::Reg(r) => Ok(env[*r as usize].clone()),
             Expr::Field(r, field) => {
-                let base = env.get(r).cloned().unwrap_or_else(|| format!("%{r}"));
-                let offset = self.struct_field_offset(r, field, env)?;
+                let base = env[*r as usize].clone();
+                let offset = self.struct_field_offset(field)?;
                 let ptr = self.fresh();
                 func_out.push_str(&format!("  %{ptr} =l add {base}, {offset}\n"));
                 let val = self.fresh();
@@ -186,7 +186,7 @@ impl Emitter {
         &mut self,
         name: &str,
         arg_exprs: &[Expr],
-        env: &HashMap<String, String>,
+        env: &[String],
         func_out: &mut String,
         has_result: bool,
     ) -> Result<String, String> {
@@ -236,31 +236,26 @@ impl Emitter {
     }
 
     /// TODO: Implement type tracking here.
-    fn struct_field_offset(
-        &self,
-        _reg: &str,
-        _field: &str,
-        _env: &HashMap<String, String>,
-    ) -> Result<usize, String> {
+    fn struct_field_offset(&self, _field: &str) -> Result<usize, String> {
         Ok(0)
     }
 
     fn emit_stmt(
         &mut self,
         stmt: &Stmt,
-        env: &mut HashMap<String, String>,
+        env: &mut Vec<String>,
         func_out: &mut String,
         loop_ctr: &mut usize,
     ) -> Result<(), String> {
         match stmt {
             Stmt::Assign(reg, expr) => {
                 let v = self.emit_expr(expr, env, func_out)?;
-                env.insert(reg.clone(), v.clone());
-                func_out.push_str(&format!("  # %{reg} = {v}\n"));
+                env[*reg as usize] = v.clone();
+                func_out.push_str(&format!("  # reg{reg} = {v}\n"));
                 Ok(())
             }
             Stmt::SetField(reg, field, expr) => {
-                let base = env.get(reg).cloned().unwrap_or_else(|| format!("%{reg}"));
+                let base = env[*reg as usize].clone();
                 let offset = self.find_field_offset(field)?;
                 let v = self.emit_expr(expr, env, func_out)?;
                 let fptr = self.fresh();
@@ -302,7 +297,7 @@ impl Emitter {
 
     fn find_field_offset(&self, field: &str) -> Result<usize, String> {
         for (_, fields) in &self.structs {
-            for (i, (fname, _)) in fields.iter().enumerate() {
+            for (i, (fname, _ty)) in fields.iter().enumerate() {
                 if fname == field {
                     return Ok(i * 8);
                 }
@@ -323,7 +318,7 @@ impl Emitter {
         let params_str = func
             .params
             .iter()
-            .map(|(name, ty)| format!("{} %{name}", Self::qbe_ty(ty)))
+            .map(|(name, ty, _idx)| format!("{} %{name}", Self::qbe_ty(ty)))
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -333,10 +328,10 @@ impl Emitter {
         ));
         out.push_str("@start\n");
 
-        let mut env: HashMap<String, String> = HashMap::new();
+        let mut env: Vec<String> = vec![String::new(); func.n_regs as usize];
 
-        for (pname, _) in &func.params {
-            env.insert(pname.clone(), format!("%{pname}"));
+        for (pname, _ty, idx) in &func.params {
+            env[*idx as usize] = format!("%{pname}");
         }
 
         let mut func_body = String::new();
