@@ -1,4 +1,4 @@
-//! Bear JIT — minimal AArch64 (Apple Silicon) native code generation.
+//! BearVM JIT — minimal AArch64 (Apple Silicon) native code generation.
 //!
 //! All instruction encodings verified against `as -arch arm64`.
 
