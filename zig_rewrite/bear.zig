@@ -145,7 +145,6 @@ fn runLlvm(program: *const bear_lexer.Program, path: []const u8, compile: bool, 
 
     const stem = std.fs.path.stem(path);
     const ir_path = std.fmt.allocPrint(alloc, "/tmp/{s}.ll", .{stem}) catch unreachable;
-    const obj_path = std.fmt.allocPrint(alloc, "/tmp/{s}.o", .{stem}) catch unreachable;
     const out_path = std.fmt.allocPrint(alloc, "./{s}", .{stem}) catch unreachable;
 
     std.fs.cwd().writeFile(.{ .sub_path = ir_path, .data = ir }) catch |e| {
@@ -153,8 +152,7 @@ fn runLlvm(program: *const bear_lexer.Program, path: []const u8, compile: bool, 
         std.process.exit(1);
     };
 
-    runCmd(alloc, &.{ "llc", "-filetype=obj", "-o", obj_path, ir_path }, "llc");
-    runCmd(alloc, &.{ "cc", obj_path, "-o", out_path }, "cc");
+    runCmd(alloc, &.{ "clang", ir_path, "-o", out_path }, "clang");
     std.debug.print("Compiled to {s}\n", .{out_path});
 }
 
