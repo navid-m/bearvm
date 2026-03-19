@@ -24,8 +24,8 @@ for f in "$SAMPLES_DIR"/*.bear; do
         echo "  skipping $name (file I/O)"
         continue
     fi
-    rust_out=$("$RUST_BIN" "$f" 2>/dev/null)
-    zig_out=$("$ZIG_BIN"  "$f" 2>/dev/null)
+    rust_out=$("$RUST_BIN" "$f" 2>/dev/null || true)
+    zig_out=$("$ZIG_BIN"  "$f" 2>/dev/null || true)
     if [ "$rust_out" = "$zig_out" ]; then
         echo "  $name: outputs match ✓"
     else
@@ -52,7 +52,7 @@ if command -v hyperfine &>/dev/null; then
             --runs 50 \
             --command-name "rust" "$RUST_BIN $f" \
             --command-name "zig"  "$ZIG_BIN  $f" \
-            2>/dev/null
+            2>/dev/null || true
         echo ""
     done
 else
@@ -65,7 +65,7 @@ else
         local start end elapsed total=0
         for _ in $(seq 1 $RUNS); do
             start=$(date +%s%N)
-            "$bin" "$file" > /dev/null 2>&1
+            "$bin" "$file" > /dev/null 2>&1 || true
             end=$(date +%s%N)
             total=$((total + end - start))
         done
@@ -94,3 +94,5 @@ else
         echo ""
     done
 fi
+
+echo "end"
