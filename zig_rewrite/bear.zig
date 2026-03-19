@@ -8,6 +8,7 @@ const bear_vm = @import("vm.zig");
 const bear_qbe = @import("qbe_emitter.zig");
 const bear_llvm = @import("llvm_emitter.zig");
 const bear_ast = @import("ast_printer.zig");
+const bear_jit = @import("jit.zig");
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -24,6 +25,21 @@ pub fn main() !void {
     const is_qbe = std.mem.eql(u8, first, "qbe");
     const is_llvm = std.mem.eql(u8, first, "llvm");
     const is_ast = std.mem.eql(u8, first, "--ast");
+    const is_jit = std.mem.eql(u8, first, "--jit");
+
+    if (is_jit) {
+        if (argv.len < 3) {
+            printUsage();
+            std.process.exit(1);
+        }
+        const path = argv[2];
+        const program = loadProgram(path, alloc);
+        bear_jit.run(&program, alloc) catch |e| {
+            std.debug.print("JIT error: {}\n", .{e});
+            std.process.exit(1);
+        };
+        return;
+    }
 
     if (is_ast) {
         if (argv.len < 3) {
@@ -83,6 +99,7 @@ fn printUsage() void {
         \\Usage:
         \\  bear <file.bear>              Run via interpreter
         \\  bear --ast <file.bear>        Print AST as unicode tree
+        \\  bear --jit <file.bear>        JIT compile and run (requires clang)
         \\  bear qbe <file.bear>          Emit QBE IR
         \\  bear qbe <file.bear> -c       Compile with QBE + cc
         \\  bear llvm <file.bear>         Emit LLVM IR
