@@ -21,12 +21,17 @@ pub const TokenTag = enum(u8) {
     kw_call,
     kw_while,
     kw_alloc,
+    kw_alloc_array,
     kw_set,
     kw_struct,
     kw_jmp,
     kw_br_if,
     kw_spawn,
     kw_sync,
+    kw_store,
+    kw_load,
+    kw_get_field_ref,
+    kw_get_index_ref,
     ty_int,
     ty_void,
     ty_string,
@@ -62,12 +67,17 @@ pub const Token = union(TokenTag) {
     kw_call,
     kw_while,
     kw_alloc,
+    kw_alloc_array,
     kw_set,
     kw_struct,
     kw_jmp,
     kw_br_if,
     kw_spawn,
     kw_sync,
+    kw_store,
+    kw_load,
+    kw_get_field_ref,
+    kw_get_index_ref,
     ty_int,
     ty_void,
     ty_string,
@@ -100,12 +110,17 @@ pub fn keywordToken(word: []const u8) ?Token {
         .{ "ge", Token.kw_ge },
         .{ "eq", Token.kw_eq },
         .{ "alloc", Token.kw_alloc },
+        .{ "alloc_array", Token.kw_alloc_array },
         .{ "set", Token.kw_set },
         .{ "struct", Token.kw_struct },
         .{ "jmp", Token.kw_jmp },
         .{ "br_if", Token.kw_br_if },
         .{ "spawn", Token.kw_spawn },
         .{ "sync", Token.kw_sync },
+        .{ "store", Token.kw_store },
+        .{ "load", Token.kw_load },
+        .{ "get_field_ref", Token.kw_get_field_ref },
+        .{ "get_index_ref", Token.kw_get_index_ref },
         .{ "int", Token.ty_int },
         .{ "void", Token.ty_void },
         .{ "string", Token.ty_string },
@@ -289,6 +304,7 @@ pub const Stmt = union(enum) {
     label: []const u8,
     jmp: []const u8,
     br_if: struct { cond: RegIdx, true_label: []const u8, false_label: []const u8 },
+    store: struct { ptr: RegIdx, expr: *Expr },
 
     pub fn deinit(self: *Stmt, alloc: std.mem.Allocator) void {
         switch (self.*) {
@@ -321,6 +337,11 @@ pub const Expr = union(enum) {
     eq: BinOp,
     call: struct { name: []const u8, args: std.ArrayListUnmanaged(*Expr) },
     alloc: *Expr,
+    alloc_type: []const u8,
+    alloc_array: struct { elem_ty: Ty, count: *Expr },
+    load: RegIdx,
+    get_field_ref: struct { ptr: RegIdx, field: []const u8 },
+    get_index_ref: struct { arr: RegIdx, idx: *Expr },
     struct_lit: struct { name: []const u8, fields: std.ArrayListUnmanaged(FieldInit) },
     named: []const u8,
     spawn: struct { name: []const u8, args: std.ArrayListUnmanaged(*Expr) },
@@ -346,7 +367,6 @@ pub const ExprSlab = struct {
         }
         alloc.free(self.buf);
     }
-
     pub fn alloc_node(self: *ExprSlab, e: Expr) error{OutOfMemory}!*Expr {
         if (self.used >= self.buf.len) return error.OutOfMemory;
         const p = &self.buf[self.used];

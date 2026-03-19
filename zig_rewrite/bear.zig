@@ -105,7 +105,7 @@ fn printUsage() void {
         \\
         \\  bear <file.bear>              Run via interpreter
         \\  bear --ast <file.bear>        Print AST as unicode tree
-        \\  bear --jit <file.bear>        JIT compile and run (requires clang)
+        \\  bear --jit <file.bear>        JIT compile and run
         \\  bear qbe <file.bear>          Emit QBE IR
         \\  bear qbe <file.bear> -c       Compile with QBE + cc
         \\  bear llvm <file.bear>         Emit LLVM IR

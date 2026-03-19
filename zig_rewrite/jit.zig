@@ -1,8 +1,9 @@
-//! BearVM JIT — minimal AArch64 (Apple Silicon) native code generation.
+//! BearVM JIT - AArch64 (Apple Silicon) native code generation.
 //!
 //! Register allocation convention (caller-saved, so free across our own calls):
-//!   X9..X15  — scratch / expression temporaries
-//!   X19..X28 — VM registers (callee-saved; we save them in the prologue)
+//!
+//!  - X9..X15  - scratch / expression temporaries
+//!  - X19..X28 - VM registers (callee-saved; we save them in the prologue)
 
 const std = @import("std");
 const lexer = @import("lexer.zig");
@@ -106,7 +107,7 @@ fn add_sp_imm(imm12: u12) u32 {
     return 0x91000000 | (@as(u32, imm12) << 10) | (31 << 5) | 31;
 }
 
-// Data-processing (register, 64-bit)
+/// Data-processing (register, 64-bit)
 fn add_r(xd: u5, xn: u5, xm: u5) u32 {
     return 0x8b000000 | (@as(u32, xm) << 16) | (@as(u32, xn) << 5) | @as(u32, xd);
 }
@@ -147,15 +148,15 @@ fn emitImm64(buf: *CodeBuf, xd: u5, val: u64) void {
     if (@as(u16, @truncate(val >> 48)) != 0) buf.emit(movk(xd, @truncate(val >> 48), 3));
 }
 
-/// CMP Xn, Xm  (SUBS XZR, Xn, Xm)
+/// CMP Xn, Xm (SUBS XZR, Xn, Xm)
 fn cmp_r(xn: u5, xm: u5) u32 {
     return 0xeb000000 | (@as(u32, xm) << 16) | (@as(u32, xn) << 5) | 31;
 }
 
-/// CSET Xd, cond  — set Xd=1 if cond, else 0
+/// CSET Xd, cond — set Xd=1 if cond, else 0
 /// Condition codes: EQ=0, NE=1, LT(signed)=0xb, GT(signed)=0xc, LE=0xd, GE=0xa
 fn cset(xd: u5, cond: u4) u32 {
-    const inv_cond: u4 = cond ^ 1; // invert LSB flips the condition
+    const inv_cond: u4 = cond ^ 1;
     return 0x9a9f0000 | (@as(u32, inv_cond) << 12) | (31 << 5) | @as(u32, xd);
 }
 
@@ -440,6 +441,7 @@ const Compiler = struct {
                 },
 
                 .set_field => return error.UnsupportedStmt,
+                .store => return error.UnsupportedStmt,
             }
         }
     }

@@ -118,6 +118,9 @@ pub const Value = union(enum) {
     str: []const u8,
     bool_: bool,
     ptr: []u8,
+    /// A typed pointer — references a heap-allocated Value cell.
+    /// Used by get_field_ref / get_index_ref / alloc_type / alloc_array.
+    ref: *HeapCell,
     file: i64,
     void_,
     struct_: StructVal,
@@ -130,6 +133,7 @@ pub const Value = union(enum) {
                 while (it.next()) |entry| entry.value_ptr.deinit(alloc);
                 sv.fields.deinit();
             },
+            // HeapCells are owned by their parent HeapStruct/HeapArray; don't free here.
             else => {},
         }
     }
@@ -146,6 +150,35 @@ pub const Value = union(enum) {
             .int => |n| n != 0,
             else => unreachable,
         };
+    }
+};
+
+/// A single heap-allocated value cell, used as the target of a `ref`.
+/// Owned by a HeapStruct or HeapArray; the ref just borrows a pointer.
+pub const HeapCell = struct {
+    value: Value,
+};
+
+/// Heap-allocated struct — fields are HeapCells so we can take refs into them.
+pub const HeapStruct = struct {
+    name: []const u8,
+    fields: std.StringArrayHashMap(HeapCell),
+
+    pub fn deinit(self: *HeapStruct, alloc: std.mem.Allocator) void {
+        var it = self.fields.iterator();
+        while (it.next()) |entry| entry.value_ptr.value.deinit(alloc);
+        self.fields.deinit();
+    }
+};
+
+/// Heap-allocated array — elements are HeapCells so we can take refs into them.
+pub const HeapArray = struct {
+    cells: []HeapCell,
+    alloc: std.mem.Allocator,
+
+    pub fn deinit(self: *HeapArray) void {
+        for (self.cells) |*c| c.value.deinit(self.alloc);
+        self.alloc.free(self.cells);
     }
 };
 
@@ -187,6 +220,10 @@ pub const Vm = struct {
     jump_tables: [][]i32,
 
     files: std.ArrayListUnmanaged(?FileHandle),
+    /// Heap-allocated structs (owned here, freed on deinit)
+    heap_structs: std.ArrayListUnmanaged(*HeapStruct),
+    /// Heap-allocated arrays (owned here, freed on deinit)
+    heap_arrays: std.ArrayListUnmanaged(*HeapArray),
     alloc: std.mem.Allocator,
     tasks: ?*TaskTable,
 
@@ -229,6 +266,8 @@ pub const Vm = struct {
             .label_maps = label_maps,
             .jump_tables = jump_tables,
             .files = .empty,
+            .heap_structs = .empty,
+            .heap_arrays = .empty,
             .alloc = alloc,
             .tasks = null,
         };
@@ -241,6 +280,16 @@ pub const Vm = struct {
         for (self.jump_tables) |jt| self.alloc.free(jt);
         self.alloc.free(self.jump_tables);
         self.files.deinit(self.alloc);
+        for (self.heap_structs.items) |hs| {
+            hs.deinit(self.alloc);
+            self.alloc.destroy(hs);
+        }
+        self.heap_structs.deinit(self.alloc);
+        for (self.heap_arrays.items) |ha| {
+            ha.deinit();
+            self.alloc.destroy(ha);
+        }
+        self.heap_arrays.deinit(self.alloc);
     }
 
     pub fn findFunc(self: *Vm, name: []const u8) ?*const lexer.Function {
@@ -336,6 +385,90 @@ pub const Vm = struct {
                     @memset(buf, 0);
                     return .{ .ptr = buf };
                 },
+                .alloc_type => |type_name| {
+                    // Find the struct definition and allocate a HeapStruct
+                    const struct_def = blk: {
+                        for (self.program.structs.items) |*sd| {
+                            if (std.mem.eql(u8, sd.name, type_name)) break :blk sd;
+                        }
+                        return error.UnknownType;
+                    };
+                    const hs = try self.alloc.create(HeapStruct);
+                    hs.* = .{
+                        .name = struct_def.name,
+                        .fields = std.StringArrayHashMap(HeapCell).init(self.alloc),
+                    };
+                    // Pre-populate fields with zero values
+                    for (struct_def.fields.items) |f| {
+                        const zero: Value = switch (f.ty) {
+                            .int => .{ .int = 0 },
+                            .bool_ => .{ .bool_ = false },
+                            .str => .{ .str = "" },
+                            else => .void_,
+                        };
+                        try hs.fields.put(f.name, .{ .value = zero });
+                    }
+                    try self.heap_structs.append(self.alloc, hs);
+                    // Encode the HeapStruct pointer in a single-cell HeapArray sentinel.
+                    // get_field_ref detects this by checking if the cell's value is a struct pointer.
+                    const ha = try self.alloc.create(HeapArray);
+                    ha.* = .{ .cells = try self.alloc.alloc(HeapCell, 1), .alloc = self.alloc };
+                    ha.cells[0] = .{ .value = .{ .int = @as(i64, @bitCast(@intFromPtr(hs))) } };
+                    try self.heap_arrays.append(self.alloc, ha);
+                    return .{ .ref = &ha.cells[0] };
+                },
+                .alloc_array => |aa| {
+                    const count: usize = @intCast((try self.evalExpr(aa.count, env)).int);
+                    const ha = try self.alloc.create(HeapArray);
+                    ha.* = .{ .cells = try self.alloc.alloc(HeapCell, count), .alloc = self.alloc };
+                    for (ha.cells) |*cell| {
+                        cell.* = .{ .value = switch (aa.elem_ty) {
+                            .int => .{ .int = 0 },
+                            .bool_ => .{ .bool_ = false },
+                            .str => .{ .str = "" },
+                            else => .void_,
+                        } };
+                    }
+                    try self.heap_arrays.append(self.alloc, ha);
+                    // Return a ref to cell[0] as the array handle
+                    return .{ .ref = &ha.cells[0] };
+                },
+                .load => |ptr_reg| {
+                    const cell = switch (env[ptr_reg]) {
+                        .ref => |r| r,
+                        else => return error.NotAPointer,
+                    };
+                    return cell.value;
+                },
+                .get_field_ref => |gfr| {
+                    // The register holds a ref whose .value is the HeapStruct pointer (as int)
+                    const cell = switch (env[gfr.ptr]) {
+                        .ref => |r| r,
+                        else => return error.NotAPointer,
+                    };
+                    const hs: *HeapStruct = @ptrFromInt(@as(usize, @intCast(cell.value.int)));
+                    const field_cell = hs.fields.getPtr(gfr.field) orelse return error.NoSuchField;
+                    return .{ .ref = field_cell };
+                },
+                .get_index_ref => |gir| {
+                    // The register holds a ref to cell[0] of a HeapArray.
+                    // We compute the element pointer by offset from cell[0].
+                    const base_cell = switch (env[gir.arr]) {
+                        .ref => |r| r,
+                        else => return error.NotAPointer,
+                    };
+                    const idx: usize = @intCast((try self.evalExpr(gir.idx, env)).int);
+                    // Walk back to the HeapArray by scanning heap_arrays for the one whose
+                    // cells[0] address matches base_cell.
+                    const ha = blk: {
+                        for (self.heap_arrays.items) |ha| {
+                            if (ha.cells.len > 0 and &ha.cells[0] == base_cell) break :blk ha;
+                        }
+                        return error.InvalidArrayPointer;
+                    };
+                    if (idx >= ha.cells.len) return error.IndexOutOfBounds;
+                    return .{ .ref = &ha.cells[idx] };
+                },
                 .struct_lit => |sl| {
                     var fields = std.StringArrayHashMap(Value).init(self.alloc);
                     for (sl.fields.items) |fi|
@@ -407,6 +540,7 @@ pub const Vm = struct {
             },
             .bool_ => |b| bear_io.writeStdout(if (b) "true\n" else "false\n"),
             .ptr => bear_io.writeStdout("<ptr>\n"),
+            .ref => bear_io.writeStdout("<ref>\n"),
             .file => |fd| bear_io.writeStdout(std.fmt.bufPrint(&tmp, "<fd:{d}>\n", .{fd}) catch return),
             .void_ => {},
             .struct_ => |sv| {
@@ -531,6 +665,42 @@ pub const Vm = struct {
                 .set_field => |sf| {
                     const val = try self.evalExpr(sf.expr, env);
                     try env[sf.reg].struct_.fields.put(sf.field, val);
+                    pc += 1;
+                },
+                .store => |s| {
+                    const cell = switch (env[s.ptr]) {
+                        .ref => |r| r,
+                        else => return error.NotAPointer,
+                    };
+                    const val = try self.evalExpr(s.expr, env);
+                    // If this ref points into a HeapStruct sentinel cell, handle struct store
+                    const is_struct_sentinel = blk: {
+                        for (self.heap_arrays.items) |ha| {
+                            if (ha.cells.len == 1 and &ha.cells[0] == cell) {
+                                // This is a struct sentinel — store a struct_lit into it
+                                // by unpacking the struct_lit value into the HeapStruct fields
+                                const hs: *HeapStruct = @ptrFromInt(@as(usize, @intCast(cell.value.int)));
+                                switch (val) {
+                                    .struct_ => |sv| {
+                                        var it = sv.fields.iterator();
+                                        while (it.next()) |entry| {
+                                            if (hs.fields.getPtr(entry.key_ptr.*)) |fc| {
+                                                fc.value = entry.value_ptr.*;
+                                            } else {
+                                                try hs.fields.put(entry.key_ptr.*, .{ .value = entry.value_ptr.* });
+                                            }
+                                        }
+                                    },
+                                    else => return error.TypeMismatch,
+                                }
+                                break :blk true;
+                            }
+                        }
+                        break :blk false;
+                    };
+                    if (!is_struct_sentinel) {
+                        cell.value = val;
+                    }
                     pc += 1;
                 },
                 .call => |c| {

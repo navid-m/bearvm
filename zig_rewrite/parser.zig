@@ -167,14 +167,48 @@ const Parser = struct {
                 break :blk try self.box(.{ .spawn = .{ .name = name, .args = try self.parseArgs(rm) } });
             },
             .kw_sync => blk: {
-                _ = self.advance(); // consume 'sync'
+                _ = self.advance();
                 const r = try self.expectReg();
                 const idx = try rm.intern(r);
                 break :blk try self.box(.{ .sync = idx });
             },
             .kw_alloc => blk: {
                 _ = self.advance();
+                if (std.meta.activeTag(self.peek()) == .ident) {
+                    const type_name = self.peek().ident;
+                    _ = self.advance();
+                    break :blk try self.box(.{ .alloc_type = type_name });
+                }
                 break :blk try self.box(.{ .alloc = try self.parseExpr(rm) });
+            },
+            .kw_alloc_array => blk: {
+                _ = self.advance();
+                const elem_ty = try self.parseTy();
+                _ = try self.expectTag(.comma);
+                const count = try self.parseExpr(rm);
+                break :blk try self.box(.{ .alloc_array = .{ .elem_ty = elem_ty, .count = count } });
+            },
+            .kw_load => blk: {
+                _ = self.advance();
+                const r = try self.expectReg();
+                const idx = try rm.intern(r);
+                break :blk try self.box(.{ .load = idx });
+            },
+            .kw_get_field_ref => blk: {
+                _ = self.advance();
+                const r = try self.expectReg();
+                const ptr_idx = try rm.intern(r);
+                _ = try self.expectTag(.comma);
+                const field = try self.expectIdent();
+                break :blk try self.box(.{ .get_field_ref = .{ .ptr = ptr_idx, .field = field } });
+            },
+            .kw_get_index_ref => blk: {
+                _ = self.advance();
+                const r = try self.expectReg();
+                const arr_idx = try rm.intern(r);
+                _ = try self.expectTag(.comma);
+                const idx_expr = try self.parseExpr(rm);
+                break :blk try self.box(.{ .get_index_ref = .{ .arr = arr_idx, .idx = idx_expr } });
             },
             .int => |n| blk: {
                 _ = self.advance();
@@ -214,6 +248,21 @@ const Parser = struct {
                     break :blk try self.box(.{ .struct_lit = .{ .name = name, .fields = fields } });
                 }
                 break :blk try self.box(.{ .named = name });
+            },
+            .lbrace => blk: {
+                _ = self.advance();
+                var fields: std.ArrayList(lexer.FieldInit) = .empty;
+                while (std.meta.activeTag(self.peek()) != .rbrace) {
+                    const fname = try self.expectIdent();
+                    _ = try self.expectTag(.colon);
+                    try fields.append(self.alloc, .{
+                        .name = fname,
+                        .expr = try self.parseExpr(rm),
+                    });
+                    if (std.meta.activeTag(self.peek()) == .comma) _ = self.advance();
+                }
+                _ = try self.expectTag(.rbrace);
+                break :blk try self.box(.{ .struct_lit = .{ .name = "", .fields = fields } });
             },
             else => error.UnexpectedExprToken,
         };
@@ -293,6 +342,14 @@ const Parser = struct {
                     try body.append(self.alloc, try self.parseStmt(rm));
                 _ = try self.expectTag(.rbrace);
                 break :blk .{ .while_ = .{ .cond = cond, .body = body } };
+            },
+            .kw_store => blk: {
+                _ = self.advance();
+                const r = try self.expectReg();
+                const ptr_idx = try rm.intern(r);
+                _ = try self.expectTag(.comma);
+                const val_expr = try self.parseExpr(rm);
+                break :blk .{ .store = .{ .ptr = ptr_idx, .expr = val_expr } };
             },
             else => error.UnexpectedStmtToken,
         };

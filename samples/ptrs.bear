@@ -1,0 +1,54 @@
+struct Person {
+    name: string
+    age: int
+}
+
+@main(): int {
+entry:
+    %p_ptr = alloc Person
+    store %p_ptr, { name: "Alice", age: 25 }
+
+    %age_ptr = get_field_ref %p_ptr, age
+    %age_val = load %age_ptr
+    %new_age = add %age_val, 1
+    store %age_ptr, %new_age
+
+    %age_val2 = load %age_ptr
+    call puts(%age_val2)
+    call flush()
+    %arr = alloc_array int, 5
+
+    %i = const 0
+array_loop_cond:
+    %cond = lt %i, 5
+    br_if %cond, array_loop_body, array_loop_end
+
+array_loop_body:
+    %elem_ptr = get_index_ref %arr, %i
+    store %elem_ptr, %i
+    %i_next = add %i, 1
+    %i = %i_next
+    jmp array_loop_cond
+
+array_loop_end:
+
+    %sum = const 0
+    %i2 = const 0
+sum_loop_cond:
+    %cond2 = lt %i2, 5
+    br_if %cond2, sum_loop_body, sum_loop_end
+
+sum_loop_body:
+    %elem_ptr2 = get_index_ref %arr, %i2
+    %val = load %elem_ptr2
+    %sum_new = add %sum, %val
+    %sum = %sum_new
+    %i_next2 = add %i2, 1
+    %i2 = %i_next2
+    jmp sum_loop_cond
+
+sum_loop_end:
+    call puts(%sum)
+    call flush()
+    ret 0
+}

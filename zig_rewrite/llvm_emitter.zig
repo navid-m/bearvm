@@ -192,6 +192,7 @@ const Emitter = struct {
             // spawn/sync: not supported in LLVM backend, treat spawn as a plain call
             .spawn => |sp| return self.emitCallExpr(sp.name, sp.args.items, env),
             .sync => |r| return env[r],
+            .alloc_type, .alloc_array, .load, .get_field_ref, .get_index_ref => return error.UnsupportedExpr,
         }
     }
 
@@ -388,6 +389,7 @@ const Emitter = struct {
                 try self.out.appendSlice(self.alloc, br.false_label);
                 try self.out.append(self.alloc, '\n');
             },
+            .store => return error.UnsupportedStmt,
         }
     }
 

@@ -124,6 +124,37 @@ const Printer = struct {
                 const s = try std.fmt.bufPrint(&buf, "sync(%{d})", .{reg});
                 self.node(prefix, is_last, depth, s);
             },
+            .alloc_type => |name| {
+                const label = try std.fmt.allocPrint(alloc, "alloc_type({s})", .{name});
+                defer alloc.free(label);
+                self.node(prefix, is_last, depth, label);
+            },
+            .alloc_array => |aa| {
+                var buf: [64]u8 = undefined;
+                const label = try std.fmt.bufPrint(&buf, "alloc_array({s})", .{@tagName(aa.elem_ty)});
+                self.node(prefix, is_last, depth, label);
+                const cp = try childPrefix(alloc, prefix, is_last);
+                defer alloc.free(cp);
+                try self.printExpr(alloc, aa.count, cp, true, depth + 1);
+            },
+            .load => |reg| {
+                var buf: [32]u8 = undefined;
+                const s = try std.fmt.bufPrint(&buf, "load(%{d})", .{reg});
+                self.node(prefix, is_last, depth, s);
+            },
+            .get_field_ref => |gfr| {
+                var buf: [64]u8 = undefined;
+                const s = try std.fmt.bufPrint(&buf, "get_field_ref(%{d}, {s})", .{ gfr.ptr, gfr.field });
+                self.node(prefix, is_last, depth, s);
+            },
+            .get_index_ref => |gir| {
+                var buf: [32]u8 = undefined;
+                const s = try std.fmt.bufPrint(&buf, "get_index_ref(%{d})", .{gir.arr});
+                self.node(prefix, is_last, depth, s);
+                const cp = try childPrefix(alloc, prefix, is_last);
+                defer alloc.free(cp);
+                try self.printExpr(alloc, gir.idx, cp, true, depth + 1);
+            },
         }
     }
 
@@ -202,6 +233,14 @@ const Printer = struct {
                 const label = try std.fmt.allocPrint(alloc, "br_if(%{d}, {s}, {s})", .{ br.cond, br.true_label, br.false_label });
                 defer alloc.free(label);
                 self.node(prefix, is_last, depth, label);
+            },
+            .store => |st| {
+                var buf: [32]u8 = undefined;
+                const label = try std.fmt.bufPrint(&buf, "store(%{d})", .{st.ptr});
+                self.node(prefix, is_last, depth, label);
+                const cp = try childPrefix(alloc, prefix, is_last);
+                defer alloc.free(cp);
+                try self.printExpr(alloc, st.expr, cp, true, depth + 1);
             },
         }
     }

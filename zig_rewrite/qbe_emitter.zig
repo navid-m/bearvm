@@ -202,6 +202,7 @@ const Emitter = struct {
             .spawn => |sp| return self.emitCallExpr(sp.name, sp.args.items, env),
             // sync: the value is already in the register
             .sync => |r| return env[r],
+            .alloc_type, .alloc_array, .load, .get_field_ref, .get_index_ref => return error.UnsupportedExpr,
         }
     }
 
@@ -342,6 +343,7 @@ const Emitter = struct {
                 try self.out.appendSlice(self.alloc, br.false_label);
                 try self.out.append(self.alloc, '\n');
             },
+            .store => return error.UnsupportedStmt,
         }
     }
 
