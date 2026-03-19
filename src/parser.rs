@@ -51,16 +51,16 @@ impl Parser {
 
     fn parse_ty(&mut self) -> Result<Ty, String> {
         match self.advance() {
-            Token::TyInt    => Ok(Ty::Int),
-            Token::TyVoid   => Ok(Ty::Void),
+            Token::TyInt => Ok(Ty::Int),
+            Token::TyVoid => Ok(Ty::Void),
             Token::TyString => Ok(Ty::Str),
-            Token::TyBool   => Ok(Ty::Bool),
+            Token::TyBool => Ok(Ty::Bool),
             Token::Ident(s) => Ok(Ty::Named(s)),
             t => Err(format!("Expected type, got {t:?}")),
         }
     }
 
-    // Parse a comma-separated argument list inside parens: (arg, arg, ...)
+    /// Parse a comma-separated argument list inside parens: (arg, arg, ...)
     fn parse_args(&mut self) -> Result<Vec<Expr>, String> {
         self.expect(&Token::LParen)?;
         let mut args = Vec::new();
@@ -134,7 +134,7 @@ impl Parser {
                 self.advance();
                 let name = match self.advance() {
                     Token::Ident(s) => s,
-                    Token::Func(s)  => s,
+                    Token::Func(s) => s,
                     t => return Err(format!("Expected function name after call, got {t:?}")),
                 };
                 let args = self.parse_args()?;
@@ -158,7 +158,6 @@ impl Parser {
             Token::Reg(r) => {
                 let r = r.clone();
                 self.advance();
-                // check for field access: %r.field
                 if self.peek() == &Token::Dot {
                     self.advance();
                     let field = self.expect_ident()?;
@@ -169,7 +168,6 @@ impl Parser {
             Token::Ident(name) => {
                 let name = name.clone();
                 self.advance();
-                // struct literal: Name { field: val ... }
                 if self.peek() == &Token::LBrace {
                     self.advance();
                     let mut fields = Vec::new();
@@ -190,7 +188,6 @@ impl Parser {
 
     fn parse_stmt(&mut self) -> Result<Stmt, String> {
         match self.peek().clone() {
-            // %r = <expr>  or  %r.field = ...  handled via Set
             Token::Reg(r) => {
                 let r = r.clone();
                 self.advance();
@@ -211,7 +208,7 @@ impl Parser {
                 self.advance();
                 let name = match self.advance() {
                     Token::Ident(s) => s,
-                    Token::Func(s)  => s,
+                    Token::Func(s) => s,
                     t => return Err(format!("Expected function name after call, got {t:?}")),
                 };
                 let args = self.parse_args()?;
@@ -256,9 +253,8 @@ impl Parser {
 
     fn parse_function(&mut self) -> Result<Function, String> {
         let name = self.expect_func()?;
-
-        // optional param list
         let mut params = Vec::new();
+
         if self.peek() == &Token::LParen {
             self.advance();
             while self.peek() != &Token::RParen {
@@ -273,7 +269,6 @@ impl Parser {
             self.expect(&Token::RParen)?;
         }
 
-        // return type: (): type  or just : type
         let ret_ty = if self.peek() == &Token::Colon {
             self.advance();
             self.parse_ty()?
@@ -288,7 +283,12 @@ impl Parser {
         }
         self.expect(&Token::RBrace)?;
 
-        Ok(Function { name, params, ret_ty, body })
+        Ok(Function {
+            name,
+            params,
+            ret_ty,
+            body,
+        })
     }
 
     fn parse_program(&mut self) -> Result<Program, String> {
