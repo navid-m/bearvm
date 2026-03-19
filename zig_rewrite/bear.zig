@@ -1,8 +1,10 @@
 //! Bear VM - Zig rewrite (Zig 0.15.2)
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
+const lexer = @import("lexer.zig");
+
 const List = std.ArrayList;
+pub const Allocator = std.mem.Allocator;
 
 var stdout_buf: [65536]u8 = undefined;
 var stdout_pos: usize = 0;
@@ -22,269 +24,6 @@ fn writeStdout(s: []const u8) void {
     @memcpy(stdout_buf[stdout_pos..][0..s.len], s);
     stdout_pos += s.len;
 }
-
-const TokenTag = enum(u8) {
-    int,
-    str,
-    ident,
-    reg,
-    func,
-    kw_const,
-    kw_add,
-    kw_sub,
-    kw_mul,
-    kw_div,
-    kw_lt,
-    kw_gt,
-    kw_eq,
-    kw_ret,
-    kw_call,
-    kw_while,
-    kw_alloc,
-    kw_set,
-    kw_struct,
-    ty_int,
-    ty_void,
-    ty_string,
-    ty_bool,
-    lbrace,
-    rbrace,
-    lparen,
-    rparen,
-    colon,
-    comma,
-    dot,
-    assign,
-    eof,
-};
-
-const Token = union(TokenTag) {
-    int: i64,
-    str: []const u8,
-    ident: []const u8,
-    reg: []const u8,
-    func: []const u8,
-    kw_const,
-    kw_add,
-    kw_sub,
-    kw_mul,
-    kw_div,
-    kw_lt,
-    kw_gt,
-    kw_eq,
-    kw_ret,
-    kw_call,
-    kw_while,
-    kw_alloc,
-    kw_set,
-    kw_struct,
-    ty_int,
-    ty_void,
-    ty_string,
-    ty_bool,
-    lbrace,
-    rbrace,
-    lparen,
-    rparen,
-    colon,
-    comma,
-    dot,
-    assign,
-    eof,
-};
-
-/// Comptime keyword table — avoids 18 string comparisons per identifier.
-fn keywordToken(word: []const u8) ?Token {
-    const kws = .{
-        .{ "const", Token.kw_const },
-        .{ "ret", Token.kw_ret },
-        .{ "call", Token.kw_call },
-        .{ "while", Token.kw_while },
-        .{ "add", Token.kw_add },
-        .{ "sub", Token.kw_sub },
-        .{ "mul", Token.kw_mul },
-        .{ "div", Token.kw_div },
-        .{ "lt", Token.kw_lt },
-        .{ "gt", Token.kw_gt },
-        .{ "eq", Token.kw_eq },
-        .{ "alloc", Token.kw_alloc },
-        .{ "set", Token.kw_set },
-        .{ "struct", Token.kw_struct },
-        .{ "int", Token.ty_int },
-        .{ "void", Token.ty_void },
-        .{ "string", Token.ty_string },
-        .{ "bool", Token.ty_bool },
-    };
-    inline for (kws) |kw| {
-        if (std.mem.eql(u8, word, kw[0])) return kw[1];
-    }
-    return null;
-}
-
-fn tokenize(src: []const u8, alloc: Allocator) !List(Token) {
-    var tokens = try List(Token).initCapacity(alloc, src.len / 4 + 8);
-    var i: usize = 0;
-    while (i < src.len) {
-        const c = src[i];
-        if (c <= ' ') {
-            i += 1;
-            continue;
-        }
-        if (c == ';') {
-            while (i < src.len and src[i] != '\n') i += 1;
-            continue;
-        }
-        switch (c) {
-            '{' => {
-                try tokens.append(alloc, .lbrace);
-                i += 1;
-            },
-            '}' => {
-                try tokens.append(alloc, .rbrace);
-                i += 1;
-            },
-            '(' => {
-                try tokens.append(alloc, .lparen);
-                i += 1;
-            },
-            ')' => {
-                try tokens.append(alloc, .rparen);
-                i += 1;
-            },
-            ':' => {
-                try tokens.append(alloc, .colon);
-                i += 1;
-            },
-            ',' => {
-                try tokens.append(alloc, .comma);
-                i += 1;
-            },
-            '.' => {
-                try tokens.append(alloc, .dot);
-                i += 1;
-            },
-            '=' => {
-                try tokens.append(alloc, .assign);
-                i += 1;
-            },
-            '"' => {
-                i += 1;
-                var s: List(u8) = .empty;
-                while (i < src.len and src[i] != '"') {
-                    if (src[i] == '\\' and i + 1 < src.len) {
-                        i += 1;
-                        const esc: u8 = switch (src[i]) {
-                            'n' => '\n',
-                            't' => '\t',
-                            '"' => '"',
-                            '\\' => '\\',
-                            else => blk: {
-                                try s.append(alloc, '\\');
-                                break :blk src[i];
-                            },
-                        };
-                        try s.append(alloc, esc);
-                    } else {
-                        try s.append(alloc, src[i]);
-                    }
-                    i += 1;
-                }
-                if (i >= src.len) return error.UnterminatedString;
-                i += 1;
-                try tokens.append(alloc, .{ .str = try s.toOwnedSlice(alloc) });
-            },
-            '%' => {
-                i += 1;
-                const start = i;
-                while (i < src.len and (std.ascii.isAlphanumeric(src[i]) or src[i] == '_')) i += 1;
-                try tokens.append(alloc, .{ .reg = src[start..i] });
-            },
-            '@' => {
-                i += 1;
-                const start = i;
-                while (i < src.len and (std.ascii.isAlphanumeric(src[i]) or src[i] == '_')) i += 1;
-                try tokens.append(alloc, .{ .func = src[start..i] });
-            },
-            else => {
-                if (std.ascii.isDigit(c) or (c == '-' and i + 1 < src.len and std.ascii.isDigit(src[i + 1]))) {
-                    const neg = c == '-';
-                    if (neg) i += 1;
-                    const start = i;
-                    while (i < src.len and std.ascii.isDigit(src[i])) i += 1;
-                    const n = try std.fmt.parseInt(i64, src[start..i], 10);
-                    try tokens.append(alloc, .{ .int = if (neg) -n else n });
-                } else if (std.ascii.isAlphabetic(c) or c == '_') {
-                    const start = i;
-                    while (i < src.len and (std.ascii.isAlphanumeric(src[i]) or src[i] == '_')) i += 1;
-                    const word = src[start..i];
-                    try tokens.append(alloc, keywordToken(word) orelse Token{ .ident = word });
-                } else return error.UnexpectedChar;
-            },
-        }
-    }
-    try tokens.append(alloc, .eof);
-    return tokens;
-}
-
-const Ty = enum { int, void_, str, bool_, named };
-const StructDef = struct { name: []const u8, fields: List(StructField) };
-const StructField = struct { name: []const u8, ty: Ty };
-const RegIdx = u16;
-const Function = struct {
-    name: []const u8,
-    params: List(Param),
-    ret_ty: Ty,
-    body: List(Stmt),
-    n_regs: u16,
-};
-
-const Param = struct { name: []const u8, ty: Ty, idx: RegIdx };
-const Program = struct { structs: List(StructDef), functions: List(Function) };
-const Stmt = union(enum) {
-    assign: struct { reg: RegIdx, expr: *Expr },
-    set_field: struct { reg: RegIdx, field: []const u8, expr: *Expr },
-    call: struct { name: []const u8, args: List(*Expr) },
-    ret: *Expr,
-    while_: struct { cond: *Expr, body: List(Stmt) },
-};
-
-const BinOp = struct { a: *Expr, b: *Expr };
-const FieldInit = struct { name: []const u8, expr: *Expr };
-const Expr = union(enum) {
-    int: i64,
-    str: []const u8,
-    reg: RegIdx,
-    field: struct { reg: RegIdx, field: []const u8 },
-    const_: *Expr,
-    add: BinOp,
-    sub: BinOp,
-    mul: BinOp,
-    div: BinOp,
-    lt: BinOp,
-    gt: BinOp,
-    eq: BinOp,
-    call: struct { name: []const u8, args: List(*Expr) },
-    alloc: *Expr,
-    struct_lit: struct { name: []const u8, fields: List(FieldInit) },
-    named: []const u8,
-};
-
-const ExprSlab = struct {
-    buf: []Expr,
-    used: usize,
-
-    fn init(alloc: Allocator, cap: usize) !ExprSlab {
-        return .{ .buf = try alloc.alloc(Expr, cap), .used = 0 };
-    }
-
-    fn alloc_node(self: *ExprSlab, e: Expr) error{OutOfMemory}!*Expr {
-        if (self.used >= self.buf.len) return error.OutOfMemory;
-        const p = &self.buf[self.used];
-        p.* = e;
-        self.used += 1;
-        return p;
-    }
-};
 
 const ParseError = error{
     UnexpectedToken,
@@ -309,11 +48,11 @@ const RegMap = struct {
         return .{ .names = .empty, .alloc = alloc };
     }
 
-    fn intern(self: *RegMap, name: []const u8) !RegIdx {
+    fn intern(self: *RegMap, name: []const u8) !lexer.RegIdx {
         for (self.names.items, 0..) |n, i|
             if (std.mem.eql(u8, n, name)) return @intCast(i);
-        const idx: RegIdx = @intCast(self.names.items.len);
-        if (idx == std.math.maxInt(RegIdx)) return error.TooManyRegisters;
+        const idx: lexer.RegIdx = @intCast(self.names.items.len);
+        if (idx == std.math.maxInt(lexer.RegIdx)) return error.TooManyRegisters;
         try self.names.append(self.alloc, name);
         return idx;
     }
@@ -324,22 +63,22 @@ const RegMap = struct {
 };
 
 const Parser = struct {
-    tokens: []const Token,
+    tokens: []const lexer.Token,
     pos: usize,
     alloc: Allocator,
-    slab: *ExprSlab,
+    slab: *lexer.ExprSlab,
 
-    fn peek(self: *Parser) Token {
+    fn peek(self: *Parser) lexer.Token {
         return self.tokens[self.pos];
     }
 
-    fn advance(self: *Parser) Token {
+    fn advance(self: *Parser) lexer.Token {
         const t = self.tokens[self.pos];
         if (self.pos + 1 < self.tokens.len) self.pos += 1;
         return t;
     }
 
-    fn expectTag(self: *Parser, tag: TokenTag) ParseError!Token {
+    fn expectTag(self: *Parser, tag: lexer.TokenTag) ParseError!lexer.Token {
         const t = self.advance();
         if (std.meta.activeTag(t) == tag) return t;
         return error.UnexpectedToken;
@@ -366,7 +105,7 @@ const Parser = struct {
         };
     }
 
-    fn parseTy(self: *Parser) ParseError!Ty {
+    fn parseTy(self: *Parser) ParseError!lexer.Ty {
         return switch (self.advance()) {
             .ty_int => .int,
             .ty_void => .void_,
@@ -377,8 +116,8 @@ const Parser = struct {
         };
     }
 
-    fn parseArgs(self: *Parser, rm: *RegMap) ParseError!List(*Expr) {
-        var args: List(*Expr) = .empty;
+    fn parseArgs(self: *Parser, rm: *RegMap) ParseError!List(*lexer.Expr) {
+        var args: List(*lexer.Expr) = .empty;
         if (std.meta.activeTag(self.peek()) != .lparen) return args;
         _ = self.advance();
         while (std.meta.activeTag(self.peek()) != .rparen) {
@@ -389,16 +128,16 @@ const Parser = struct {
         return args;
     }
 
-    fn box(self: *Parser, e: Expr) ParseError!*Expr {
+    fn box(self: *Parser, e: lexer.Expr) ParseError!*lexer.Expr {
         return self.slab.alloc_node(e);
     }
 
-    fn parseBinOp(self: *Parser, rm: *RegMap, comptime tag: TokenTag) ParseError!*Expr {
+    fn parseBinOp(self: *Parser, rm: *RegMap, comptime tag: lexer.TokenTag) ParseError!*lexer.Expr {
         _ = self.advance();
         const a = try self.parseExpr(rm);
         _ = try self.expectTag(.comma);
         const b = try self.parseExpr(rm);
-        const payload = BinOp{ .a = a, .b = b };
+        const payload = lexer.BinOp{ .a = a, .b = b };
         return self.box(switch (tag) {
             .kw_add => .{ .add = payload },
             .kw_sub => .{ .sub = payload },
@@ -411,7 +150,7 @@ const Parser = struct {
         });
     }
 
-    fn parseExpr(self: *Parser, rm: *RegMap) ParseError!*Expr {
+    fn parseExpr(self: *Parser, rm: *RegMap) ParseError!*lexer.Expr {
         return switch (self.peek()) {
             .kw_const => blk: {
                 _ = self.advance();
@@ -461,7 +200,7 @@ const Parser = struct {
                 _ = self.advance();
                 if (std.meta.activeTag(self.peek()) == .lbrace) {
                     _ = self.advance();
-                    var fields: List(FieldInit) = .empty;
+                    var fields: List(lexer.FieldInit) = .empty;
                     while (std.meta.activeTag(self.peek()) != .rbrace) {
                         const fname = try self.expectIdent();
                         _ = try self.expectTag(.colon);
@@ -480,7 +219,7 @@ const Parser = struct {
         };
     }
 
-    fn parseStmt(self: *Parser, rm: *RegMap) ParseError!Stmt {
+    fn parseStmt(self: *Parser, rm: *RegMap) ParseError!lexer.Stmt {
         return switch (self.peek()) {
             .reg => |r| blk: {
                 _ = self.advance();
@@ -520,7 +259,7 @@ const Parser = struct {
                 const cond = try self.parseExpr(rm);
                 _ = try self.expectTag(.rparen);
                 _ = try self.expectTag(.lbrace);
-                var body: List(Stmt) = .empty;
+                var body: List(lexer.Stmt) = .empty;
                 while (std.meta.activeTag(self.peek()) != .rbrace)
                     try body.append(self.alloc, try self.parseStmt(rm));
                 _ = try self.expectTag(.rbrace);
@@ -530,11 +269,11 @@ const Parser = struct {
         };
     }
 
-    fn parseStruct(self: *Parser) ParseError!StructDef {
+    fn parseStruct(self: *Parser) ParseError!lexer.StructDef {
         _ = try self.expectTag(.kw_struct);
         const name = try self.expectIdent();
         _ = try self.expectTag(.lbrace);
-        var fields: List(StructField) = .empty;
+        var fields: List(lexer.StructField) = .empty;
         while (std.meta.activeTag(self.peek()) != .rbrace) {
             const fname = try self.expectIdent();
             _ = try self.expectTag(.colon);
@@ -544,11 +283,11 @@ const Parser = struct {
         return .{ .name = name, .fields = fields };
     }
 
-    fn parseFunction(self: *Parser) ParseError!Function {
+    fn parseFunction(self: *Parser) ParseError!lexer.Function {
         const name = try self.expectFunc();
         var rm = RegMap.init(self.alloc);
 
-        var params: List(Param) = .empty;
+        var params: List(lexer.Param) = .empty;
         if (std.meta.activeTag(self.peek()) == .lparen) {
             _ = self.advance();
             while (std.meta.activeTag(self.peek()) != .rparen) {
@@ -561,12 +300,12 @@ const Parser = struct {
             }
             _ = try self.expectTag(.rparen);
         }
-        const ret_ty: Ty = if (std.meta.activeTag(self.peek()) == .colon) blk: {
+        const ret_ty: lexer.Ty = if (std.meta.activeTag(self.peek()) == .colon) blk: {
             _ = self.advance();
             break :blk try self.parseTy();
         } else .void_;
         _ = try self.expectTag(.lbrace);
-        var body: List(Stmt) = .empty;
+        var body: List(lexer.Stmt) = .empty;
         while (std.meta.activeTag(self.peek()) != .rbrace)
             try body.append(self.alloc, try self.parseStmt(&rm));
         _ = try self.expectTag(.rbrace);
@@ -579,9 +318,9 @@ const Parser = struct {
         };
     }
 
-    fn parseProgram(self: *Parser) ParseError!Program {
-        var structs: List(StructDef) = .empty;
-        var functions: List(Function) = .empty;
+    fn parseProgram(self: *Parser) ParseError!lexer.Program {
+        var structs: List(lexer.StructDef) = .empty;
+        var functions: List(lexer.Function) = .empty;
         while (std.meta.activeTag(self.peek()) != .eof) {
             switch (self.peek()) {
                 .kw_struct => try structs.append(self.alloc, try self.parseStruct()),
@@ -593,8 +332,8 @@ const Parser = struct {
     }
 };
 
-fn parse(tokens: []const Token, alloc: Allocator) !Program {
-    var slab = try ExprSlab.init(alloc, tokens.len / 3 + 64);
+fn parse(tokens: []const lexer.Token, alloc: Allocator) !lexer.Program {
+    var slab = try lexer.ExprSlab.init(alloc, tokens.len / 3 + 64);
     var p = Parser{ .tokens = tokens, .pos = 0, .alloc = alloc, .slab = &slab };
     return p.parseProgram();
 }
@@ -625,15 +364,15 @@ const builtin_map = std.StaticStringMap(BuiltinTag).initComptime(.{
 });
 
 const Vm = struct {
-    program: *const Program,
+    program: *const lexer.Program,
     files: List(?FileHandle),
     alloc: Allocator,
 
-    fn init(program: *const Program, alloc: Allocator) Vm {
+    fn init(program: *const lexer.Program, alloc: Allocator) Vm {
         return .{ .program = program, .files = .empty, .alloc = alloc };
     }
 
-    fn findFunc(self: *Vm, name: []const u8) ?*const Function {
+    fn findFunc(self: *Vm, name: []const u8) ?*const lexer.Function {
         for (self.program.functions.items) |*f|
             if (std.mem.eql(u8, f.name, name)) return f;
         return null;
@@ -650,7 +389,7 @@ const Vm = struct {
         return @intCast(self.files.items.len - 1);
     }
 
-    fn evalExpr(self: *Vm, expr: *const Expr, env: []Value) anyerror!Value {
+    fn evalExpr(self: *Vm, expr: *const lexer.Expr, env: []Value) anyerror!Value {
         return switch (expr.*) {
             .int => |n| .{ .int = n },
             .str => |s| .{ .str = s },
@@ -715,7 +454,7 @@ const Vm = struct {
         }
     }
 
-    fn callFunc(self: *Vm, name: []const u8, arg_exprs: []*Expr, env: []Value) anyerror!Value {
+    fn callFunc(self: *Vm, name: []const u8, arg_exprs: []*lexer.Expr, env: []Value) anyerror!Value {
         var args_buf: [32]Value = undefined;
         const argc = arg_exprs.len;
         if (argc > 32) return error.TooManyArguments;
@@ -792,13 +531,13 @@ const Vm = struct {
         return (try self.execBody(func.body.items, new_env)) orelse .void_;
     }
 
-    fn execBody(self: *Vm, stmts: []const Stmt, env: []Value) anyerror!?Value {
+    fn execBody(self: *Vm, stmts: []const lexer.Stmt, env: []Value) anyerror!?Value {
         for (stmts) |*stmt|
             if (try self.execStmt(stmt, env)) |v| return v;
         return null;
     }
 
-    fn execStmt(self: *Vm, stmt: *const Stmt, env: []Value) anyerror!?Value {
+    fn execStmt(self: *Vm, stmt: *const lexer.Stmt, env: []Value) anyerror!?Value {
         switch (stmt.*) {
             .assign => |a| {
                 env[a.reg] = try self.evalExpr(a.expr, env);
@@ -827,7 +566,7 @@ const Vm = struct {
     }
 };
 
-fn run(program: *const Program, alloc: Allocator) !void {
+fn run(program: *const lexer.Program, alloc: Allocator) !void {
     var vm = Vm.init(program, alloc);
     const main_fn = vm.findFunc("main") orelse return error.NoMainFunction;
     const env = try alloc.alloc(Value, main_fn.n_regs);
@@ -851,7 +590,7 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    var tokens = tokenize(src, alloc) catch |e| {
+    var tokens = lexer.tokenize(src, alloc) catch |e| {
         std.debug.print("Lex error: {}\n", .{e});
         std.process.exit(1);
     };
@@ -868,18 +607,18 @@ pub fn main() !void {
     };
 }
 
-fn testLex(src: []const u8, alloc: Allocator) ![]Token {
-    var list = try tokenize(src, alloc);
+fn testLex(src: []const u8, alloc: Allocator) ![]lexer.Token {
+    var list = try lexer.tokenize(src, alloc);
     return list.toOwnedSlice(alloc);
 }
 
-fn testParse(src: []const u8, alloc: Allocator) !Program {
-    const list = try tokenize(src, alloc);
+fn testParse(src: []const u8, alloc: Allocator) !lexer.Program {
+    const list = try lexer.tokenize(src, alloc);
     return parse(list.items, alloc);
 }
 
 fn evalMain(src: []const u8, alloc: Allocator) !Value {
-    const list = try tokenize(src, alloc);
+    const list = try lexer.tokenize(src, alloc);
     const prog = try parse(list.items, alloc);
     var vm = Vm.init(&prog, alloc);
     const main_fn = vm.findFunc("main") orelse return error.NoMainFunction;
@@ -893,51 +632,51 @@ test "lexer: empty input yields only eof" {
     const toks = try testLex("", alloc);
     defer alloc.free(toks);
     try std.testing.expectEqual(@as(usize, 1), toks.len);
-    try std.testing.expectEqual(TokenTag.eof, std.meta.activeTag(toks[0]));
+    try std.testing.expectEqual(lexer.TokenTag.eof, std.meta.activeTag(toks[0]));
 }
 
 test "lexer: keywords" {
     const alloc = std.testing.allocator;
     const toks = try testLex("const add sub mul div lt gt eq ret call while alloc set struct", alloc);
     defer alloc.free(toks);
-    try std.testing.expectEqual(TokenTag.kw_const, std.meta.activeTag(toks[0]));
-    try std.testing.expectEqual(TokenTag.kw_add, std.meta.activeTag(toks[1]));
-    try std.testing.expectEqual(TokenTag.kw_sub, std.meta.activeTag(toks[2]));
-    try std.testing.expectEqual(TokenTag.kw_mul, std.meta.activeTag(toks[3]));
-    try std.testing.expectEqual(TokenTag.kw_div, std.meta.activeTag(toks[4]));
-    try std.testing.expectEqual(TokenTag.kw_lt, std.meta.activeTag(toks[5]));
-    try std.testing.expectEqual(TokenTag.kw_gt, std.meta.activeTag(toks[6]));
-    try std.testing.expectEqual(TokenTag.kw_eq, std.meta.activeTag(toks[7]));
-    try std.testing.expectEqual(TokenTag.kw_ret, std.meta.activeTag(toks[8]));
-    try std.testing.expectEqual(TokenTag.kw_call, std.meta.activeTag(toks[9]));
-    try std.testing.expectEqual(TokenTag.kw_while, std.meta.activeTag(toks[10]));
-    try std.testing.expectEqual(TokenTag.kw_alloc, std.meta.activeTag(toks[11]));
-    try std.testing.expectEqual(TokenTag.kw_set, std.meta.activeTag(toks[12]));
-    try std.testing.expectEqual(TokenTag.kw_struct, std.meta.activeTag(toks[13]));
+    try std.testing.expectEqual(lexer.TokenTag.kw_const, std.meta.activeTag(toks[0]));
+    try std.testing.expectEqual(lexer.TokenTag.kw_add, std.meta.activeTag(toks[1]));
+    try std.testing.expectEqual(lexer.TokenTag.kw_sub, std.meta.activeTag(toks[2]));
+    try std.testing.expectEqual(lexer.TokenTag.kw_mul, std.meta.activeTag(toks[3]));
+    try std.testing.expectEqual(lexer.TokenTag.kw_div, std.meta.activeTag(toks[4]));
+    try std.testing.expectEqual(lexer.TokenTag.kw_lt, std.meta.activeTag(toks[5]));
+    try std.testing.expectEqual(lexer.TokenTag.kw_gt, std.meta.activeTag(toks[6]));
+    try std.testing.expectEqual(lexer.TokenTag.kw_eq, std.meta.activeTag(toks[7]));
+    try std.testing.expectEqual(lexer.TokenTag.kw_ret, std.meta.activeTag(toks[8]));
+    try std.testing.expectEqual(lexer.TokenTag.kw_call, std.meta.activeTag(toks[9]));
+    try std.testing.expectEqual(lexer.TokenTag.kw_while, std.meta.activeTag(toks[10]));
+    try std.testing.expectEqual(lexer.TokenTag.kw_alloc, std.meta.activeTag(toks[11]));
+    try std.testing.expectEqual(lexer.TokenTag.kw_set, std.meta.activeTag(toks[12]));
+    try std.testing.expectEqual(lexer.TokenTag.kw_struct, std.meta.activeTag(toks[13]));
 }
 
 test "lexer: type keywords" {
     const alloc = std.testing.allocator;
     const toks = try testLex("int void string bool", alloc);
     defer alloc.free(toks);
-    try std.testing.expectEqual(TokenTag.ty_int, std.meta.activeTag(toks[0]));
-    try std.testing.expectEqual(TokenTag.ty_void, std.meta.activeTag(toks[1]));
-    try std.testing.expectEqual(TokenTag.ty_string, std.meta.activeTag(toks[2]));
-    try std.testing.expectEqual(TokenTag.ty_bool, std.meta.activeTag(toks[3]));
+    try std.testing.expectEqual(lexer.TokenTag.ty_int, std.meta.activeTag(toks[0]));
+    try std.testing.expectEqual(lexer.TokenTag.ty_void, std.meta.activeTag(toks[1]));
+    try std.testing.expectEqual(lexer.TokenTag.ty_string, std.meta.activeTag(toks[2]));
+    try std.testing.expectEqual(lexer.TokenTag.ty_bool, std.meta.activeTag(toks[3]));
 }
 
 test "lexer: punctuation" {
     const alloc = std.testing.allocator;
     const toks = try testLex("{ } ( ) : , . =", alloc);
     defer alloc.free(toks);
-    try std.testing.expectEqual(TokenTag.lbrace, std.meta.activeTag(toks[0]));
-    try std.testing.expectEqual(TokenTag.rbrace, std.meta.activeTag(toks[1]));
-    try std.testing.expectEqual(TokenTag.lparen, std.meta.activeTag(toks[2]));
-    try std.testing.expectEqual(TokenTag.rparen, std.meta.activeTag(toks[3]));
-    try std.testing.expectEqual(TokenTag.colon, std.meta.activeTag(toks[4]));
-    try std.testing.expectEqual(TokenTag.comma, std.meta.activeTag(toks[5]));
-    try std.testing.expectEqual(TokenTag.dot, std.meta.activeTag(toks[6]));
-    try std.testing.expectEqual(TokenTag.assign, std.meta.activeTag(toks[7]));
+    try std.testing.expectEqual(lexer.TokenTag.lbrace, std.meta.activeTag(toks[0]));
+    try std.testing.expectEqual(lexer.TokenTag.rbrace, std.meta.activeTag(toks[1]));
+    try std.testing.expectEqual(lexer.TokenTag.lparen, std.meta.activeTag(toks[2]));
+    try std.testing.expectEqual(lexer.TokenTag.rparen, std.meta.activeTag(toks[3]));
+    try std.testing.expectEqual(lexer.TokenTag.colon, std.meta.activeTag(toks[4]));
+    try std.testing.expectEqual(lexer.TokenTag.comma, std.meta.activeTag(toks[5]));
+    try std.testing.expectEqual(lexer.TokenTag.dot, std.meta.activeTag(toks[6]));
+    try std.testing.expectEqual(lexer.TokenTag.assign, std.meta.activeTag(toks[7]));
 }
 
 test "lexer: integer literals" {
@@ -967,9 +706,9 @@ test "lexer: register and func sigils" {
     const alloc = std.testing.allocator;
     const toks = try testLex("%my_reg @my_func", alloc);
     defer alloc.free(toks);
-    try std.testing.expectEqual(TokenTag.reg, std.meta.activeTag(toks[0]));
+    try std.testing.expectEqual(lexer.TokenTag.reg, std.meta.activeTag(toks[0]));
     try std.testing.expectEqualStrings("my_reg", toks[0].reg);
-    try std.testing.expectEqual(TokenTag.func, std.meta.activeTag(toks[1]));
+    try std.testing.expectEqual(lexer.TokenTag.func, std.meta.activeTag(toks[1]));
     try std.testing.expectEqualStrings("my_func", toks[1].func);
 }
 
@@ -977,7 +716,7 @@ test "lexer: identifier" {
     const alloc = std.testing.allocator;
     const toks = try testLex("puts other_func", alloc);
     defer alloc.free(toks);
-    try std.testing.expectEqual(TokenTag.ident, std.meta.activeTag(toks[0]));
+    try std.testing.expectEqual(lexer.TokenTag.ident, std.meta.activeTag(toks[0]));
     try std.testing.expectEqualStrings("puts", toks[0].ident);
     try std.testing.expectEqualStrings("other_func", toks[1].ident);
 }
@@ -1004,14 +743,14 @@ test "parser: minimal void function" {
     const prog = try testParse("@other_func: void { ret 0 }", alloc);
     try std.testing.expectEqual(@as(usize, 1), prog.functions.items.len);
     try std.testing.expectEqualStrings("other_func", prog.functions.items[0].name);
-    try std.testing.expectEqual(Ty.void_, prog.functions.items[0].ret_ty);
+    try std.testing.expectEqual(lexer.Ty.void_, prog.functions.items[0].ret_ty);
     try std.testing.expectEqual(@as(usize, 0), prog.functions.items[0].params.items.len);
 }
 
 test "parser: function with empty parens and return type" {
     const alloc = std.testing.allocator;
     const prog = try testParse("@main(): int { ret 0 }", alloc);
-    try std.testing.expectEqual(Ty.int, prog.functions.items[0].ret_ty);
+    try std.testing.expectEqual(lexer.Ty.int, prog.functions.items[0].ret_ty);
 }
 
 test "parser: call without args" {
@@ -1034,7 +773,7 @@ test "parser: assign const int" {
     const alloc = std.testing.allocator;
     const prog = try testParse("@main(): int { %x = const 42 ret 0 }", alloc);
     const stmt = prog.functions.items[0].body.items[0];
-    try std.testing.expectEqual(@as(RegIdx, 0), stmt.assign.reg);
+    try std.testing.expectEqual(@as(lexer.RegIdx, 0), stmt.assign.reg);
 }
 
 test "parser: assign add expr" {
@@ -1222,7 +961,7 @@ test "interpreter: alloc returns ptr" {
 
 test "interpreter: no main is error" {
     const alloc = std.testing.allocator;
-    const list = try tokenize("@other: void { ret 0 }", alloc);
+    const list = try lexer.tokenize("@other: void { ret 0 }", alloc);
     const prog = try parse(list.items, alloc);
     var vm = Vm.init(&prog, alloc);
     try std.testing.expect(vm.findFunc("main") == null);
