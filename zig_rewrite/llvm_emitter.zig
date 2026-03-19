@@ -4,64 +4,75 @@
 const std = @import("std");
 const lexer = @import("lexer.zig");
 
+const TmpId = u32;
+
+const Slot = union(enum) {
+    tmp: TmpId,
+    param: []const u8,
+    undef,
+};
+
+const StringEntry = struct { content: []const u8, idx: usize, byte_len: usize };
+
 const Emitter = struct {
     alloc: std.mem.Allocator,
     out: std.ArrayList(u8),
-    strings: std.ArrayList(StringEntry),
+    strings: std.ArrayListUnmanaged(StringEntry),
     str_count: usize,
-    tmp: usize,
-    loop_ctr: usize,
-    structs: std.StringHashMap([]const lexer.StructField),
-
-    const StringEntry = struct {
-        content: []const u8,
-        label: []const u8,
-        len: usize,
-    };
+    tmp: TmpId,
+    loop_ctr: u32,
+    structs: std.StringHashMapUnmanaged([]const lexer.StructField),
 
     fn init(alloc: std.mem.Allocator) Emitter {
         return .{
             .alloc = alloc,
-            .out = .empty,
+            .out = std.ArrayList(u8).init(alloc),
             .strings = .empty,
             .str_count = 0,
             .tmp = 0,
             .loop_ctr = 0,
-            .structs = std.StringHashMap([]const lexer.StructField).init(alloc),
+            .structs = .empty,
         };
     }
 
     fn deinit(self: *Emitter) void {
-        for (self.strings.items) |e| self.alloc.free(e.label);
         self.strings.deinit(self.alloc);
-        self.structs.deinit();
-        self.out.deinit(self.alloc);
+        self.structs.deinit(self.alloc);
+        self.out.deinit();
     }
 
-    fn fresh(self: *Emitter) ![]const u8 {
-        const n = self.tmp;
+    inline fn fresh(self: *Emitter) TmpId {
+        const id = self.tmp;
         self.tmp += 1;
-        return std.fmt.allocPrint(self.alloc, "%t{d}", .{n});
+        return id;
     }
 
-    fn internStr(self: *Emitter, s: []const u8) ![]const u8 {
-        for (self.strings.items) |e| {
-            if (std.mem.eql(u8, e.content, s)) return e.label;
+    /// Write "%tN" into the output buffer.
+    inline fn writeTmp(self: *Emitter, id: TmpId) !void {
+        var buf: [16]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "%t{d}", .{id}) catch unreachable;
+        try self.out.appendSlice(s);
+    }
+
+    inline fn writeSlot(self: *Emitter, slot: Slot) !void {
+        switch (slot) {
+            .tmp => |id| try self.writeTmp(id),
+            .param => |name| {
+                try self.out.append('%');
+                try self.out.appendSlice(name);
+            },
+            .undef => try self.out.appendSlice("undef"),
         }
-        const label = try std.fmt.allocPrint(self.alloc, "@.str{d}", .{self.str_count});
-        self.str_count += 1;
-        try self.strings.append(self.alloc, .{ .content = s, .label = label, .len = s.len + 1 });
-        return label;
     }
 
-    fn llvmTy(ty: lexer.Ty) []const u8 {
-        return switch (ty) {
-            .int => "i64",
-            .str => "ptr",
-            .bool_ => "i1",
-            .void_ => "void",
-            .named => "ptr",
-        };
+    fn internStr(self: *Emitter, s: []const u8) !usize {
+        for (self.strings.items) |e| {
+            if (std.mem.eql(u8, e.content, s)) return e.idx;
+        }
+        const idx = self.str_count;
+        self.str_count += 1;
+        try self.strings.append(self.alloc, .{ .content = s, .idx = idx, .byte_len = s.len + 1 });
+        return idx;
     }
 
     fn fieldOffset(self: *Emitter, field: []const u8) !usize {
@@ -74,110 +85,86 @@ const Emitter = struct {
         return error.UnknownField;
     }
 
-    fn emitExpr(self: *Emitter, expr: *lexer.Expr, env: [][]const u8) (error{ OutOfMemory, UnknownField, UnknownNamedConstant, UnknownStruct, MissingField } || std.fs.File.WriteError)![]const u8 {
-        const w = self.out.writer(self.alloc);
+    fn emitExpr(self: *Emitter, expr: *const lexer.Expr, env: []Slot) !Slot {
         switch (expr.*) {
             .int => |n| {
-                const t = try self.fresh();
-                try w.print("  {s} = add i64 0, {d}\n", .{ t, n });
-                return t;
+                const t = self.fresh();
+                try self.out.appendSlice("  ");
+                try self.writeTmp(t);
+                var buf: [32]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, " = add i64 0, {d}\n", .{n}) catch unreachable;
+                try self.out.appendSlice(s);
+                return .{ .tmp = t };
             },
             .str => |s| {
-                const label = try self.internStr(s);
-                const t = try self.fresh();
-                try w.print("  {s} = getelementptr inbounds [{d} x i8], ptr {s}, i64 0, i64 0\n", .{ t, s.len + 1, label });
-                return t;
+                const idx = try self.internStr(s);
+                const t = self.fresh();
+                try self.out.appendSlice("  ");
+                try self.writeTmp(t);
+                var buf: [64]u8 = undefined;
+                const line = std.fmt.bufPrint(&buf, " = getelementptr inbounds [{d} x i8], ptr @.str{d}, i64 0, i64 0\n", .{ s.len + 1, idx }) catch unreachable;
+                try self.out.appendSlice(line);
+                return .{ .tmp = t };
             },
-            .reg => |r| return try self.alloc.dupe(u8, env[r]),
+            .reg => |r| return env[r],
             .field => |f| {
                 const base = env[f.reg];
                 const idx = try self.fieldOffset(f.field);
-                const gep = try self.fresh();
-                try w.print("  {s} = getelementptr inbounds i64, ptr {s}, i64 {d}\n", .{ gep, base, idx });
-                const val = try self.fresh();
-                try w.print("  {s} = load i64, ptr {s}\n", .{ val, gep });
-                return val;
+                const gep = self.fresh();
+                try self.out.appendSlice("  ");
+                try self.writeTmp(gep);
+                try self.out.appendSlice(" = getelementptr inbounds i64, ptr ");
+                try self.writeSlot(base);
+                var buf: [24]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, ", i64 {d}\n", .{idx}) catch unreachable;
+                try self.out.appendSlice(s);
+                const val = self.fresh();
+                try self.out.appendSlice("  ");
+                try self.writeTmp(val);
+                try self.out.appendSlice(" = load i64, ptr ");
+                try self.writeTmp(gep);
+                try self.out.append('\n');
+                return .{ .tmp = val };
             },
             .const_ => |inner| return self.emitExpr(inner, env),
-            .add => |b| {
-                const av = try self.emitExpr(b.a, env);
-                const bv = try self.emitExpr(b.b, env);
-                const t = try self.fresh();
-                try w.print("  {s} = add i64 {s}, {s}\n", .{ t, av, bv });
-                return t;
-            },
-            .sub => |b| {
-                const av = try self.emitExpr(b.a, env);
-                const bv = try self.emitExpr(b.b, env);
-                const t = try self.fresh();
-                try w.print("  {s} = sub i64 {s}, {s}\n", .{ t, av, bv });
-                return t;
-            },
-            .mul => |b| {
-                const av = try self.emitExpr(b.a, env);
-                const bv = try self.emitExpr(b.b, env);
-                const t = try self.fresh();
-                try w.print("  {s} = mul i64 {s}, {s}\n", .{ t, av, bv });
-                return t;
-            },
-            .div => |b| {
-                const av = try self.emitExpr(b.a, env);
-                const bv = try self.emitExpr(b.b, env);
-                const t = try self.fresh();
-                try w.print("  {s} = sdiv i64 {s}, {s}\n", .{ t, av, bv });
-                return t;
-            },
-            .lt => |b| {
-                const av = try self.emitExpr(b.a, env);
-                const bv = try self.emitExpr(b.b, env);
-                const cmp = try self.fresh();
-                try w.print("  {s} = icmp slt i64 {s}, {s}\n", .{ cmp, av, bv });
-                const t = try self.fresh();
-                try w.print("  {s} = zext i1 {s} to i64\n", .{ t, cmp });
-                return t;
-            },
-            .gt => |b| {
-                const av = try self.emitExpr(b.a, env);
-                const bv = try self.emitExpr(b.b, env);
-                const cmp = try self.fresh();
-                try w.print("  {s} = icmp sgt i64 {s}, {s}\n", .{ cmp, av, bv });
-                const t = try self.fresh();
-                try w.print("  {s} = zext i1 {s} to i64\n", .{ t, cmp });
-                return t;
-            },
-            .eq => |b| {
-                const av = try self.emitExpr(b.a, env);
-                const bv = try self.emitExpr(b.b, env);
-                const cmp = try self.fresh();
-                try w.print("  {s} = icmp eq i64 {s}, {s}\n", .{ cmp, av, bv });
-                const t = try self.fresh();
-                try w.print("  {s} = zext i1 {s} to i64\n", .{ t, cmp });
-                return t;
-            },
+            .add => |b| return self.emitBinOp(b, env, " = add i64 "),
+            .sub => |b| return self.emitBinOp(b, env, " = sub i64 "),
+            .mul => |b| return self.emitBinOp(b, env, " = mul i64 "),
+            .div => |b| return self.emitBinOp(b, env, " = sdiv i64 "),
+            .lt => |b| return self.emitCmp(b, env, "slt"),
+            .gt => |b| return self.emitCmp(b, env, "sgt"),
+            .eq => |b| return self.emitCmp(b, env, "eq"),
             .alloc => |size_expr| {
                 const sv = try self.emitExpr(size_expr, env);
-                const t = try self.fresh();
-                try w.print("  {s} = alloca i8, i64 {s}, align 8\n", .{ t, sv });
-                return t;
+                const t = self.fresh();
+                try self.out.appendSlice("  ");
+                try self.writeTmp(t);
+                try self.out.appendSlice(" = alloca i8, i64 ");
+                try self.writeSlot(sv);
+                try self.out.appendSlice(", align 8\n");
+                return .{ .tmp = t };
             },
             .named => |name| {
-                const val: i64 = if (std.mem.eql(u8, name, "READ"))
-                    0
-                else if (std.mem.eql(u8, name, "WRITE"))
-                    1
-                else
-                    return error.UnknownNamedConstant;
-                const t = try self.fresh();
-                try w.print("  {s} = add i64 0, {d}\n", .{ t, val });
-                return t;
+                const val: i64 = if (name.len > 0 and name[0] == 'R') 0 else if (name.len > 0 and name[0] == 'W') 1 else return error.UnknownNamedConstant;
+                const t = self.fresh();
+                try self.out.appendSlice("  ");
+                try self.writeTmp(t);
+                var buf: [32]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, " = add i64 0, {d}\n", .{val}) catch unreachable;
+                try self.out.appendSlice(s);
+                return .{ .tmp = t };
             },
             .struct_lit => |sl| {
                 const fields = self.structs.get(sl.name) orelse return error.UnknownStruct;
                 const size = fields.len * 8;
-                const ptr = try self.fresh();
-                try w.print("  {s} = alloca i8, i64 {d}, align 8\n", .{ ptr, size });
+                const ptr = self.fresh();
+                try self.out.appendSlice("  ");
+                try self.writeTmp(ptr);
+                var buf: [32]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, " = alloca i8, i64 {d}, align 8\n", .{size}) catch unreachable;
+                try self.out.appendSlice(s);
                 for (fields, 0..) |fd, i| {
-                    var fval: ?*lexer.Expr = null;
+                    var fval: ?*const lexer.Expr = null;
                     for (sl.fields.items) |fi| {
                         if (std.mem.eql(u8, fi.name, fd.name)) {
                             fval = fi.expr;
@@ -185,183 +172,315 @@ const Emitter = struct {
                         }
                     }
                     const v = try self.emitExpr(fval orelse return error.MissingField, env);
-                    const gep = try self.fresh();
-                    try w.print("  {s} = getelementptr inbounds i64, ptr {s}, i64 {d}\n", .{ gep, ptr, i });
-                    try w.print("  store i64 {s}, ptr {s}\n", .{ v, gep });
+                    const gep = self.fresh();
+                    try self.out.appendSlice("  ");
+                    try self.writeTmp(gep);
+                    try self.out.appendSlice(" = getelementptr inbounds i64, ptr ");
+                    try self.writeTmp(ptr);
+                    const off = std.fmt.bufPrint(&buf, ", i64 {d}\n", .{i}) catch unreachable;
+                    try self.out.appendSlice(off);
+                    try self.out.appendSlice("  store i64 ");
+                    try self.writeSlot(v);
+                    try self.out.appendSlice(", ptr ");
+                    try self.writeTmp(gep);
+                    try self.out.append('\n');
                 }
-                return ptr;
+                return .{ .tmp = ptr };
             },
             .call => |c| return self.emitCallExpr(c.name, c.args.items, env),
         }
     }
 
-    /// Build the argument list string for a call, tracking which args are ptrs.
-    fn buildArgsStr(self: *Emitter, name: []const u8, arg_exprs: []*lexer.Expr, env: [][]const u8) ![]const u8 {
-        var buf: std.ArrayList(u8) = .empty;
-        const bw = buf.writer(self.alloc);
+    inline fn emitBinOp(self: *Emitter, b: lexer.BinOp, env: []Slot, comptime op: []const u8) !Slot {
+        const av = try self.emitExpr(b.a, env);
+        const bv = try self.emitExpr(b.b, env);
+        const t = self.fresh();
+        try self.out.appendSlice("  ");
+        try self.writeTmp(t);
+        try self.out.appendSlice(op);
+        try self.writeSlot(av);
+        try self.out.appendSlice(", ");
+        try self.writeSlot(bv);
+        try self.out.append('\n');
+        return .{ .tmp = t };
+    }
+
+    inline fn emitCmp(self: *Emitter, b: lexer.BinOp, env: []Slot, comptime pred: []const u8) !Slot {
+        const av = try self.emitExpr(b.a, env);
+        const bv = try self.emitExpr(b.b, env);
+        const cmp = self.fresh();
+        try self.out.appendSlice("  ");
+        try self.writeTmp(cmp);
+        try self.out.appendSlice(" = icmp " ++ pred ++ " i64 ");
+        try self.writeSlot(av);
+        try self.out.appendSlice(", ");
+        try self.writeSlot(bv);
+        try self.out.append('\n');
+        const t = self.fresh();
+        try self.out.appendSlice("  ");
+        try self.writeTmp(t);
+        try self.out.appendSlice(" = zext i1 ");
+        try self.writeTmp(cmp);
+        try self.out.appendSlice(" to i64\n");
+        return .{ .tmp = t };
+    }
+
+    fn emitCallExpr(self: *Emitter, name: []const u8, arg_exprs: []*const lexer.Expr, env: []Slot) !Slot {
+        var slots_buf: [16]Slot = undefined;
+        var is_ptr_buf: [16]bool = undefined;
+        const argc = arg_exprs.len;
         for (arg_exprs, 0..) |a, i| {
-            const is_str = (a.* == .str or a.* == .const_ and a.const_.* == .str);
-            const v = try self.emitExpr(a, env);
-            const ty: []const u8 = if (is_str or
-                (std.mem.eql(u8, name, "puts") and i == 0)) "ptr" else "i64";
-            if (i > 0) try bw.writeAll(", ");
-            try bw.print("{s} {s}", .{ ty, v });
+            slots_buf[i] = try self.emitExpr(a, env);
+            is_ptr_buf[i] = switch (a.*) {
+                .str => true,
+                .reg => |r| switch (env[r]) {
+                    .param => true,
+                    else => false,
+                },
+                else => false,
+            } or (std.mem.eql(u8, name, "puts") and i == 0);
         }
-        return buf.toOwnedSlice(self.alloc);
-    }
-
-    fn emitCallExpr(self: *Emitter, name: []const u8, arg_exprs: []*lexer.Expr, env: [][]const u8) ![]const u8 {
-        const w = self.out.writer(self.alloc);
-        const args_str = try self.buildArgsStr(name, arg_exprs, env);
-        const ret_ty: []const u8 = if (std.mem.eql(u8, name, "puts"))
-            "i32"
-        else
-            "i64";
-        const t = try self.fresh();
-        try w.print("  {s} = call {s} @{s}({s})\n", .{ t, ret_ty, name, args_str });
-        return t;
-    }
-
-    fn emitCallStmt(self: *Emitter, name: []const u8, arg_exprs: []*lexer.Expr, env: [][]const u8) !void {
-        const w = self.out.writer(self.alloc);
-        const args_str = try self.buildArgsStr(name, arg_exprs, env);
         const ret_ty: []const u8 = if (std.mem.eql(u8, name, "puts")) "i32" else "i64";
-        const t = try self.fresh();
-        try w.print("  {s} = call {s} @{s}({s})\n", .{ t, ret_ty, name, args_str });
+        const t = self.fresh();
+        try self.out.appendSlice("  ");
+        try self.writeTmp(t);
+        try self.out.appendSlice(" = call ");
+        try self.out.appendSlice(ret_ty);
+        try self.out.appendSlice(" @");
+        try self.out.appendSlice(name);
+        try self.out.append('(');
+        for (0..argc) |i| {
+            if (i > 0) try self.out.appendSlice(", ");
+            try self.out.appendSlice(if (is_ptr_buf[i]) "ptr " else "i64 ");
+            try self.writeSlot(slots_buf[i]);
+        }
+        try self.out.appendSlice(")\n");
+        return .{ .tmp = t };
     }
 
-    fn emitStmt(self: *Emitter, stmt: *const lexer.Stmt, env: [][]const u8, func_name: []const u8) !void {
-        const w = self.out.writer(self.alloc);
+    fn emitCallStmt(self: *Emitter, name: []const u8, arg_exprs: []*const lexer.Expr, env: []Slot) !void {
+        var slots_buf: [16]Slot = undefined;
+        var is_ptr_buf: [16]bool = undefined;
+        const argc = arg_exprs.len;
+        for (arg_exprs, 0..) |a, i| {
+            slots_buf[i] = try self.emitExpr(a, env);
+            is_ptr_buf[i] = switch (a.*) {
+                .str => true,
+                .reg => |r| switch (env[r]) {
+                    .param => true,
+                    else => false,
+                },
+                else => false,
+            } or (std.mem.eql(u8, name, "puts") and i == 0);
+        }
+        const ret_ty: []const u8 = if (std.mem.eql(u8, name, "puts")) "i32" else "i64";
+        const t = self.fresh();
+        try self.out.appendSlice("  ");
+        try self.writeTmp(t);
+        try self.out.appendSlice(" = call ");
+        try self.out.appendSlice(ret_ty);
+        try self.out.appendSlice(" @");
+        try self.out.appendSlice(name);
+        try self.out.append('(');
+        for (0..argc) |i| {
+            if (i > 0) try self.out.appendSlice(", ");
+            try self.out.appendSlice(if (is_ptr_buf[i]) "ptr " else "i64 ");
+            try self.writeSlot(slots_buf[i]);
+        }
+        try self.out.appendSlice(")\n");
+    }
+
+    fn emitStmt(self: *Emitter, stmt: *const lexer.Stmt, env: []Slot, func_name: []const u8) !void {
         switch (stmt.*) {
-            .assign => |a| {
-                const v = try self.emitExpr(a.expr, env);
-                env[a.reg] = v;
-            },
+            .assign => |a| env[a.reg] = try self.emitExpr(a.expr, env),
             .set_field => |sf| {
                 const base = env[sf.reg];
                 const idx = try self.fieldOffset(sf.field);
                 const v = try self.emitExpr(sf.expr, env);
-                const gep = try self.fresh();
-                try w.print("  {s} = getelementptr inbounds i64, ptr {s}, i64 {d}\n", .{ gep, base, idx });
-                try w.print("  store i64 {s}, ptr {s}\n", .{ v, gep });
+                const gep = self.fresh();
+                try self.out.appendSlice("  ");
+                try self.writeTmp(gep);
+                try self.out.appendSlice(" = getelementptr inbounds i64, ptr ");
+                try self.writeSlot(base);
+                var buf: [24]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, ", i64 {d}\n", .{idx}) catch unreachable;
+                try self.out.appendSlice(s);
+                try self.out.appendSlice("  store i64 ");
+                try self.writeSlot(v);
+                try self.out.appendSlice(", ptr ");
+                try self.writeTmp(gep);
+                try self.out.append('\n');
             },
             .call => |c| try self.emitCallStmt(c.name, c.args.items, env),
             .ret => |e| {
                 const v = try self.emitExpr(e, env);
-                try w.print("  ret i64 {s}\n", .{v});
+                try self.out.appendSlice("  ret i64 ");
+                try self.writeSlot(v);
+                try self.out.append('\n');
             },
             .while_ => |wh| {
                 const lc = self.loop_ctr;
                 self.loop_ctr += 1;
-                const lcheck = try std.fmt.allocPrint(self.alloc, "{s}.loop{d}.check", .{ func_name, lc });
-                const lbody = try std.fmt.allocPrint(self.alloc, "{s}.loop{d}.body", .{ func_name, lc });
-                const lend = try std.fmt.allocPrint(self.alloc, "{s}.loop{d}.end", .{ func_name, lc });
+                var lbuf: [128]u8 = undefined;
+                const lcheck = std.fmt.bufPrint(&lbuf, "{s}.loop{d}.check", .{ func_name, lc }) catch unreachable;
+                const lcheck_owned = try self.alloc.dupe(u8, lcheck);
+                defer self.alloc.free(lcheck_owned);
+                var lbuf2: [128]u8 = undefined;
+                const lbody = std.fmt.bufPrint(&lbuf2, "{s}.loop{d}.body", .{ func_name, lc }) catch unreachable;
+                const lbody_owned = try self.alloc.dupe(u8, lbody);
+                defer self.alloc.free(lbody_owned);
+                var lbuf3: [128]u8 = undefined;
+                const lend = std.fmt.bufPrint(&lbuf3, "{s}.loop{d}.end", .{ func_name, lc }) catch unreachable;
+                const lend_owned = try self.alloc.dupe(u8, lend);
+                defer self.alloc.free(lend_owned);
 
-                try w.print("  br label %{s}\n", .{lcheck});
-                try w.print("{s}:\n", .{lcheck});
+                try self.out.appendSlice("  br label %");
+                try self.out.appendSlice(lcheck_owned);
+                try self.out.append('\n');
+                try self.out.appendSlice(lcheck_owned);
+                try self.out.appendSlice(":\n");
                 const cv = try self.emitExpr(wh.cond, env);
-                const cond1 = try self.fresh();
-                try w.print("  {s} = icmp ne i64 {s}, 0\n", .{ cond1, cv });
-                try w.print("  br i1 {s}, label %{s}, label %{s}\n", .{ cond1, lbody, lend });
-                try w.print("{s}:\n", .{lbody});
+                const cond1 = self.fresh();
+                try self.out.appendSlice("  ");
+                try self.writeTmp(cond1);
+                try self.out.appendSlice(" = icmp ne i64 ");
+                try self.writeSlot(cv);
+                try self.out.appendSlice(", 0\n  br i1 ");
+                try self.writeTmp(cond1);
+                try self.out.appendSlice(", label %");
+                try self.out.appendSlice(lbody_owned);
+                try self.out.appendSlice(", label %");
+                try self.out.appendSlice(lend_owned);
+                try self.out.append('\n');
+                try self.out.appendSlice(lbody_owned);
+                try self.out.appendSlice(":\n");
                 for (wh.body.items) |*s| try self.emitStmt(s, env, func_name);
-                try w.print("  br label %{s}\n", .{lcheck});
-                try w.print("{s}:\n", .{lend});
+                try self.out.appendSlice("  br label %");
+                try self.out.appendSlice(lcheck_owned);
+                try self.out.append('\n');
+                try self.out.appendSlice(lend_owned);
+                try self.out.appendSlice(":\n");
             },
-            .label => |name| try w.print("{s}:\n", .{name}),
-            .jmp => |target| try w.print("  br label %{s}\n", .{target}),
+            .label => |name| {
+                try self.out.appendSlice(name);
+                try self.out.appendSlice(":\n");
+            },
+            .jmp => |target| {
+                try self.out.appendSlice("  br label %");
+                try self.out.appendSlice(target);
+                try self.out.append('\n');
+            },
             .br_if => |br| {
-                const cond_v = env[br.cond];
-                const cond1 = try self.fresh();
-                try w.print("  {s} = icmp ne i64 {s}, 0\n", .{ cond1, cond_v });
-                try w.print("  br i1 {s}, label %{s}, label %{s}\n", .{ cond1, br.true_label, br.false_label });
+                const cond1 = self.fresh();
+                try self.out.appendSlice("  ");
+                try self.writeTmp(cond1);
+                try self.out.appendSlice(" = icmp ne i64 ");
+                try self.writeSlot(env[br.cond]);
+                try self.out.appendSlice(", 0\n  br i1 ");
+                try self.writeTmp(cond1);
+                try self.out.appendSlice(", label %");
+                try self.out.appendSlice(br.true_label);
+                try self.out.appendSlice(", label %");
+                try self.out.appendSlice(br.false_label);
+                try self.out.append('\n');
             },
         }
     }
 
     fn emitFunction(self: *Emitter, func: *const lexer.Function) !void {
-        const w = self.out.writer(self.alloc);
         const ret = if (func.ret_ty == .void_) "void" else "i64";
-        try w.print("define {s} @{s}(", .{ ret, func.name });
+        try self.out.appendSlice("define ");
+        try self.out.appendSlice(ret);
+        try self.out.appendSlice(" @");
+        try self.out.appendSlice(func.name);
+        try self.out.append('(');
         for (func.params.items, 0..) |p, i| {
-            if (i > 0) try w.writeAll(", ");
-            try w.print("{s} %{s}", .{ llvmTy(p.ty), p.name });
+            if (i > 0) try self.out.appendSlice(", ");
+            const pty: []const u8 = switch (p.ty) {
+                .str, .named => "ptr",
+                .bool_ => "i1",
+                else => "i64",
+            };
+            try self.out.appendSlice(pty);
+            try self.out.appendSlice(" %");
+            try self.out.appendSlice(p.name);
         }
-        try w.writeAll(") {\nentry:\n");
+        try self.out.appendSlice(") {\nentry:\n");
 
-        const env = try self.alloc.alloc([]const u8, func.n_regs);
+        const env = try self.alloc.alloc(Slot, func.n_regs);
         defer self.alloc.free(env);
-        for (env) |*e| e.* = "undef";
-        for (func.params.items) |p| {
-            env[p.idx] = try std.fmt.allocPrint(self.alloc, "%{s}", .{p.name});
-        }
+        @memset(env, .undef);
+        for (func.params.items) |p| env[p.idx] = .{ .param = p.name };
 
         const body_start = self.out.items.len;
         for (func.body.items) |*s| try self.emitStmt(s, env, func.name);
 
         const body_text = self.out.items[body_start..];
-        if (std.mem.indexOf(u8, body_text, "\n  ret ") == null and
+        const needs_ret = std.mem.indexOf(u8, body_text, "\n  ret ") == null and
             !std.mem.endsWith(u8, std.mem.trimRight(u8, body_text, "\n"), "  ret void") and
-            !std.mem.endsWith(u8, std.mem.trimRight(u8, body_text, "\n"), "  ret i64"))
-        {
+            !std.mem.endsWith(u8, std.mem.trimRight(u8, body_text, "\n"), "  ret i64");
+        if (needs_ret) {
             if (func.ret_ty == .void_) {
-                try w.writeAll("  ret void\n");
+                try self.out.appendSlice("  ret void\n");
             } else {
-                try w.writeAll("  ret i64 0\n");
+                try self.out.appendSlice("  ret i64 0\n");
             }
         }
 
-        try w.writeAll("}\n\n");
+        try self.out.appendSlice("}\n\n");
     }
 
     fn emitDeclarations(self: *Emitter) !void {
-        const w = self.out.writer(self.alloc);
-        try w.writeAll("declare i32 @puts(ptr)\n");
-        try w.writeAll("declare i64 @open(ptr, i64)\n");
-        try w.writeAll("declare i64 @read(i64, ptr, i64)\n");
-        try w.writeAll("declare i64 @write(i64, ptr, i64)\n");
-        try w.writeAll("declare i64 @close(i64)\n");
-        try w.writeByte('\n');
+        try self.out.appendSlice(
+            \\declare i32 @puts(ptr)
+            \\declare i64 @open(ptr, i64)
+            \\declare i64 @read(i64, ptr, i64)
+            \\declare i64 @write(i64, ptr, i64)
+            \\declare i64 @close(i64)
+            \\
+            \\
+        );
     }
 
     fn emitDataSection(self: *Emitter) !void {
-        const w = self.out.writer(self.alloc);
         for (self.strings.items) |e| {
-            try w.print("{s} = private unnamed_addr constant [{d} x i8] c\"", .{ e.label, e.len });
+            var buf: [32]u8 = undefined;
+            const hdr = std.fmt.bufPrint(&buf, "@.str{d} = private unnamed_addr constant [{d} x i8] c\"", .{ e.idx, e.byte_len }) catch unreachable;
+            try self.out.appendSlice(hdr);
             for (e.content) |ch| {
                 switch (ch) {
-                    '\n' => try w.writeAll("\\0A"),
-                    '"' => try w.writeAll("\\22"),
-                    '\\' => try w.writeAll("\\5C"),
-                    else => try w.writeByte(ch),
+                    '\n' => try self.out.appendSlice("\\0A"),
+                    '"' => try self.out.appendSlice("\\22"),
+                    '\\' => try self.out.appendSlice("\\5C"),
+                    else => try self.out.append(ch),
                 }
             }
-            try w.writeAll("\\00\"\n");
+            try self.out.appendSlice("\\00\"\n");
         }
-        if (self.strings.items.len > 0) try w.writeByte('\n');
+        if (self.strings.items.len > 0) try self.out.append('\n');
     }
 
     pub fn emitProgram(self: *Emitter, program: *const lexer.Program) ![]const u8 {
+        var stmt_count: usize = 0;
+        for (program.functions.items) |*f| stmt_count += f.body.items.len;
+        try self.out.ensureTotalCapacity(stmt_count * 80 + 512);
+
         for (program.structs.items) |*s| {
-            try self.structs.put(s.name, s.fields.items);
+            try self.structs.put(self.alloc, s.name, s.fields.items);
         }
 
-        var func_buf: std.ArrayList(u8) = .empty;
-        const saved = self.out;
-        self.out = func_buf;
+        const func_start = self.out.items.len;
         for (program.functions.items) |*f| try self.emitFunction(f);
-        func_buf = self.out;
-        self.out = saved;
+        const func_text = try self.alloc.dupe(u8, self.out.items[func_start..]);
+        defer self.alloc.free(func_text);
+        self.out.items.len = func_start;
 
-        const w = self.out.writer(self.alloc);
-        try w.writeAll("; Bear LLVM IR\n");
-        try w.writeAll("target triple = \"x86_64-unknown-linux-gnu\"\n\n");
+        try self.out.appendSlice("; Bear LLVM IR\ntarget triple = \"x86_64-unknown-linux-gnu\"\n\n");
         try self.emitDeclarations();
         try self.emitDataSection();
-        try self.out.appendSlice(self.alloc, func_buf.items);
-        func_buf.deinit(self.alloc);
+        try self.out.appendSlice(func_text);
 
-        return self.out.toOwnedSlice(self.alloc);
+        return try self.out.toOwnedSlice();
     }
 };
 
