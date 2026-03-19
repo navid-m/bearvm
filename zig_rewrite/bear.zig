@@ -1,16 +1,29 @@
-// Bear language VM - Zig rewrite (Zig 0.15)
-// Single-file: lexer + parser + AST + interpreter
+//! Bear language VM - Zig rewrite (Zig 0.15.2)
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-
-// We use an arena for all AST/token allocations so we never need to free individually.
-// The ArrayList type in Zig 0.15 is unmanaged: pass allocator to append/deinit.
 const List = std.ArrayList;
 
-// ─── Lexer ────────────────────────────────────────────────────────────────────
+var stdout_buf: [65536]u8 = undefined;
+var stdout_pos: usize = 0;
 
-const TokenTag = enum {
+fn flushStdout() void {
+    if (stdout_pos == 0) return;
+    _ = std.fs.File.stdout().writeAll(stdout_buf[0..stdout_pos]) catch {};
+    stdout_pos = 0;
+}
+
+fn writeStdout(s: []const u8) void {
+    if (stdout_pos + s.len > stdout_buf.len) flushStdout();
+    if (s.len > stdout_buf.len) {
+        _ = std.fs.File.stdout().writeAll(s) catch {};
+        return;
+    }
+    @memcpy(stdout_buf[stdout_pos..][0..s.len], s);
+    stdout_pos += s.len;
+}
+
+const TokenTag = enum(u8) {
     int,
     str,
     ident,
@@ -80,12 +93,40 @@ const Token = union(TokenTag) {
     eof,
 };
 
+// Perfect hash for keywords — avoids 18 string comparisons per identifier
+fn keywordToken(word: []const u8) ?Token {
+    const kws = .{
+        .{ "const", Token.kw_const },
+        .{ "ret", Token.kw_ret },
+        .{ "call", Token.kw_call },
+        .{ "while", Token.kw_while },
+        .{ "add", Token.kw_add },
+        .{ "sub", Token.kw_sub },
+        .{ "mul", Token.kw_mul },
+        .{ "div", Token.kw_div },
+        .{ "lt", Token.kw_lt },
+        .{ "gt", Token.kw_gt },
+        .{ "eq", Token.kw_eq },
+        .{ "alloc", Token.kw_alloc },
+        .{ "set", Token.kw_set },
+        .{ "struct", Token.kw_struct },
+        .{ "int", Token.ty_int },
+        .{ "void", Token.ty_void },
+        .{ "string", Token.ty_string },
+        .{ "bool", Token.ty_bool },
+    };
+    inline for (kws) |kw| {
+        if (std.mem.eql(u8, word, kw[0])) return kw[1];
+    }
+    return null;
+}
+
 fn tokenize(src: []const u8, alloc: Allocator) !List(Token) {
-    var tokens = List(Token).empty;
+    var tokens = try List(Token).initCapacity(alloc, src.len / 4 + 8);
     var i: usize = 0;
     while (i < src.len) {
         const c = src[i];
-        if (c == ' ' or c == '\t' or c == '\r' or c == '\n') {
+        if (c <= ' ') {
             i += 1;
             continue;
         }
@@ -176,8 +217,7 @@ fn tokenize(src: []const u8, alloc: Allocator) !List(Token) {
                     const start = i;
                     while (i < src.len and (std.ascii.isAlphanumeric(src[i]) or src[i] == '_')) i += 1;
                     const word = src[start..i];
-                    const tok: Token =
-                        if (std.mem.eql(u8, word, "const")) .kw_const else if (std.mem.eql(u8, word, "add")) .kw_add else if (std.mem.eql(u8, word, "sub")) .kw_sub else if (std.mem.eql(u8, word, "mul")) .kw_mul else if (std.mem.eql(u8, word, "div")) .kw_div else if (std.mem.eql(u8, word, "lt")) .kw_lt else if (std.mem.eql(u8, word, "gt")) .kw_gt else if (std.mem.eql(u8, word, "eq")) .kw_eq else if (std.mem.eql(u8, word, "ret")) .kw_ret else if (std.mem.eql(u8, word, "call")) .kw_call else if (std.mem.eql(u8, word, "while")) .kw_while else if (std.mem.eql(u8, word, "alloc")) .kw_alloc else if (std.mem.eql(u8, word, "set")) .kw_set else if (std.mem.eql(u8, word, "struct")) .kw_struct else if (std.mem.eql(u8, word, "int")) .ty_int else if (std.mem.eql(u8, word, "void")) .ty_void else if (std.mem.eql(u8, word, "string")) .ty_string else if (std.mem.eql(u8, word, "bool")) .ty_bool else .{ .ident = word };
+                    const tok = keywordToken(word) orelse Token{ .ident = word };
                     try tokens.append(alloc, tok);
                 } else return error.UnexpectedChar;
             },
@@ -187,28 +227,12 @@ fn tokenize(src: []const u8, alloc: Allocator) !List(Token) {
     return tokens;
 }
 
-// ─── AST ──────────────────────────────────────────────────────────────────────
-
 const Ty = enum { int, void_, str, bool_, named };
-
-const StructDef = struct {
-    name: []const u8,
-    fields: List(StructField),
-};
+const StructDef = struct { name: []const u8, fields: List(StructField) };
 const StructField = struct { name: []const u8, ty: Ty };
-
-const Function = struct {
-    name: []const u8,
-    params: List(Param),
-    ret_ty: Ty,
-    body: List(Stmt),
-};
+const Function = struct { name: []const u8, params: List(Param), ret_ty: Ty, body: List(Stmt) };
 const Param = struct { name: []const u8, ty: Ty };
-
-const Program = struct {
-    structs: List(StructDef),
-    functions: List(Function),
-};
+const Program = struct { structs: List(StructDef), functions: List(Function) };
 
 const Stmt = union(enum) {
     assign: struct { reg: []const u8, expr: *Expr },
@@ -220,7 +244,6 @@ const Stmt = union(enum) {
 
 const BinOp = struct { a: *Expr, b: *Expr };
 const FieldInit = struct { name: []const u8, expr: *Expr };
-
 const Expr = union(enum) {
     int: i64,
     str: []const u8,
@@ -240,7 +263,18 @@ const Expr = union(enum) {
     named: []const u8,
 };
 
-// ─── Parser ───────────────────────────────────────────────────────────────────
+const ParseError = error{
+    UnexpectedToken,
+    ExpectedIdent,
+    ExpectedReg,
+    ExpectedFunc,
+    ExpectedType,
+    ExpectedFuncName,
+    UnexpectedExprToken,
+    UnexpectedStmtToken,
+    UnexpectedTopLevel,
+    OutOfMemory,
+};
 
 const Parser = struct {
     tokens: []const Token,
@@ -257,32 +291,34 @@ const Parser = struct {
         return t;
     }
 
-    fn expectTag(self: *Parser, tag: TokenTag) !Token {
+    fn expectTag(self: *Parser, tag: TokenTag) ParseError!Token {
         const t = self.advance();
         if (std.meta.activeTag(t) == tag) return t;
         return error.UnexpectedToken;
     }
 
-    fn expectIdent(self: *Parser) ![]const u8 {
+    fn expectIdent(self: *Parser) ParseError![]const u8 {
         return switch (self.advance()) {
             .ident => |s| s,
             else => error.ExpectedIdent,
         };
     }
-    fn expectReg(self: *Parser) ![]const u8 {
+
+    fn expectReg(self: *Parser) ParseError![]const u8 {
         return switch (self.advance()) {
             .reg => |s| s,
             else => error.ExpectedReg,
         };
     }
-    fn expectFunc(self: *Parser) ![]const u8 {
+
+    fn expectFunc(self: *Parser) ParseError![]const u8 {
         return switch (self.advance()) {
             .func => |s| s,
             else => error.ExpectedFunc,
         };
     }
 
-    fn parseTy(self: *Parser) !Ty {
+    fn parseTy(self: *Parser) ParseError!Ty {
         return switch (self.advance()) {
             .ty_int => .int,
             .ty_void => .void_,
@@ -292,19 +328,6 @@ const Parser = struct {
             else => error.ExpectedType,
         };
     }
-
-    const ParseError = error{
-        UnexpectedToken,
-        ExpectedIdent,
-        ExpectedReg,
-        ExpectedFunc,
-        ExpectedType,
-        ExpectedFuncName,
-        UnexpectedExprToken,
-        UnexpectedStmtToken,
-        UnexpectedTopLevel,
-        OutOfMemory,
-    };
 
     fn parseArgs(self: *Parser) ParseError!List(*Expr) {
         var args = List(*Expr).empty;
@@ -324,21 +347,22 @@ const Parser = struct {
         return p;
     }
 
-    fn parseBinOp(self: *Parser, tag: TokenTag) ParseError!*Expr {
+    fn parseBinOp(self: *Parser, comptime tag: TokenTag) ParseError!*Expr {
         _ = self.advance();
         const a = try self.parseExpr();
         _ = try self.expectTag(.comma);
         const b = try self.parseExpr();
-        return switch (tag) {
-            .kw_add => try self.box(.{ .add = .{ .a = a, .b = b } }),
-            .kw_sub => try self.box(.{ .sub = .{ .a = a, .b = b } }),
-            .kw_mul => try self.box(.{ .mul = .{ .a = a, .b = b } }),
-            .kw_div => try self.box(.{ .div = .{ .a = a, .b = b } }),
-            .kw_lt => try self.box(.{ .lt = .{ .a = a, .b = b } }),
-            .kw_gt => try self.box(.{ .gt = .{ .a = a, .b = b } }),
-            .kw_eq => try self.box(.{ .eq = .{ .a = a, .b = b } }),
+        const payload = BinOp{ .a = a, .b = b };
+        return self.box(switch (tag) {
+            .kw_add => .{ .add = payload },
+            .kw_sub => .{ .sub = payload },
+            .kw_mul => .{ .mul = payload },
+            .kw_div => .{ .div = payload },
+            .kw_lt => .{ .lt = payload },
+            .kw_gt => .{ .gt = payload },
+            .kw_eq => .{ .eq = payload },
             else => unreachable,
-        };
+        });
     }
 
     fn parseExpr(self: *Parser) ParseError!*Expr {
@@ -379,8 +403,7 @@ const Parser = struct {
                 _ = self.advance();
                 if (std.meta.activeTag(self.peek()) == .dot) {
                     _ = self.advance();
-                    const f = try self.expectIdent();
-                    break :blk try self.box(.{ .field = .{ .reg = r, .field = f } });
+                    break :blk try self.box(.{ .field = .{ .reg = r, .field = try self.expectIdent() } });
                 }
                 break :blk try self.box(.{ .reg = r });
             },
@@ -505,7 +528,7 @@ fn parse(tokens: []const Token, alloc: Allocator) !Program {
     return p.parseProgram();
 }
 
-// ─── Interpreter ─────────────────────────────────────────────────────────────
+const Env = std.StringArrayHashMap(Value);
 
 const Value = union(enum) {
     int: i64,
@@ -519,13 +542,10 @@ const Value = union(enum) {
 
 const StructVal = struct {
     name: []const u8,
-    fields: std.StringHashMap(Value),
+    fields: std.StringArrayHashMap(Value),
 };
 
-const FileHandle = union(enum) {
-    read: std.fs.File,
-    write: std.fs.File,
-};
+const FileHandle = union(enum) { read: std.fs.File, write: std.fs.File };
 
 const Vm = struct {
     program: *const Program,
@@ -553,7 +573,7 @@ const Vm = struct {
         return @intCast(self.files.items.len - 1);
     }
 
-    fn evalExpr(self: *Vm, expr: *const Expr, env: *std.StringHashMap(Value)) anyerror!Value {
+    fn evalExpr(self: *Vm, expr: *const Expr, env: *Env) anyerror!Value {
         return switch (expr.*) {
             .int => |n| .{ .int = n },
             .str => |s| .{ .str = s },
@@ -566,9 +586,9 @@ const Vm = struct {
                 };
             },
             .const_ => |inner| try self.evalExpr(inner, env),
-            .add => |op| .{ .int = (try self.evalExpr(op.a, env)).int + (try self.evalExpr(op.b, env)).int },
-            .sub => |op| .{ .int = (try self.evalExpr(op.a, env)).int - (try self.evalExpr(op.b, env)).int },
-            .mul => |op| .{ .int = (try self.evalExpr(op.a, env)).int * (try self.evalExpr(op.b, env)).int },
+            .add => |op| .{ .int = (try self.evalExpr(op.a, env)).int +% (try self.evalExpr(op.b, env)).int },
+            .sub => |op| .{ .int = (try self.evalExpr(op.a, env)).int -% (try self.evalExpr(op.b, env)).int },
+            .mul => |op| .{ .int = (try self.evalExpr(op.a, env)).int *% (try self.evalExpr(op.b, env)).int },
             .div => |op| blk: {
                 const b = (try self.evalExpr(op.b, env)).int;
                 if (b == 0) return error.DivisionByZero;
@@ -592,7 +612,7 @@ const Vm = struct {
                 break :blk .{ .ptr = buf };
             },
             .struct_lit => |sl| blk: {
-                var fields = std.StringHashMap(Value).init(self.alloc);
+                var fields = std.StringArrayHashMap(Value).init(self.alloc);
                 for (sl.fields.items) |fi|
                     try fields.put(fi.name, try self.evalExpr(fi.expr, env));
                 break :blk .{ .struct_ = .{ .name = sl.name, .fields = fields } };
@@ -603,33 +623,51 @@ const Vm = struct {
     }
 
     fn printValue(_: *Vm, val: Value) void {
+        var tmp: [64]u8 = undefined;
         switch (val) {
-            .int => |n| std.debug.print("{d}\n", .{n}),
-            .str => |s| std.debug.print("{s}\n", .{s}),
-            .bool_ => |b| std.debug.print("{}\n", .{b}),
-            .ptr => std.debug.print("<ptr>\n", .{}),
-            .file => |fd| std.debug.print("<fd:{d}>\n", .{fd}),
+            .int => |n| {
+                const s = std.fmt.bufPrint(&tmp, "{d}\n", .{n}) catch return;
+                writeStdout(s);
+            },
+            .str => |s| {
+                writeStdout(s);
+                writeStdout("\n");
+            },
+            .bool_ => |b| {
+                writeStdout(if (b) "true\n" else "false\n");
+            },
+            .ptr => writeStdout("<ptr>\n"),
+            .file => |fd| {
+                const s = std.fmt.bufPrint(&tmp, "<fd:{d}>\n", .{fd}) catch return;
+                writeStdout(s);
+            },
             .void_ => {},
-            .struct_ => |sv| std.debug.print("{s} {{ ... }}\n", .{sv.name}),
+            .struct_ => |sv| {
+                writeStdout(sv.name);
+                writeStdout(" { ... }\n");
+            },
         }
     }
 
-    fn callFunc(self: *Vm, name: []const u8, arg_exprs: []*Expr, env: *std.StringHashMap(Value)) anyerror!Value {
-        var args = List(Value).empty;
-        for (arg_exprs) |a| try args.append(self.alloc, try self.evalExpr(a, env));
+    /// Use a fixed stack buffer for args to avoid heap allocation on every call
+    fn callFunc(self: *Vm, name: []const u8, arg_exprs: []*Expr, env: *Env) anyerror!Value {
+        var args_buf: [32]Value = undefined;
+        const argc = arg_exprs.len;
+        std.debug.assert(argc <= 32);
+        for (arg_exprs, 0..) |a, i|
+            args_buf[i] = try self.evalExpr(a, env);
+        const args = args_buf[0..argc];
 
         if (std.mem.eql(u8, name, "puts")) {
-            for (args.items) |a| self.printValue(a);
+            for (args) |a| self.printValue(a);
+            flushStdout();
             return .void_;
         }
         if (std.mem.eql(u8, name, "open")) {
-            const path = args.items[0].str;
-            const mode = args.items[1].int;
+            const path = args[0].str;
+            const mode = args[1].int;
             const fd = if (mode == 0) blk: {
-                const f = std.fs.cwd().openFile(path, .{}) catch |err| {
-                    std.debug.print("failed: {}\n", .{err});
-                    return error.InvalidFileHandle;
-                };
+                const f = try std.fs.cwd().openFile(path, .{});
                 break :blk try self.allocFile(.{ .read = f });
             } else blk: {
                 const f = try std.fs.cwd().createFile(path, .{ .truncate = true });
@@ -638,8 +676,8 @@ const Vm = struct {
             return .{ .file = fd };
         }
         if (std.mem.eql(u8, name, "read")) {
-            const fd: usize = @intCast(args.items[0].file);
-            const size: usize = @intCast(args.items[2].int);
+            const fd: usize = @intCast(args[0].file);
+            const size: usize = @intCast(args[2].int);
             const buf = try self.alloc.alloc(u8, size);
             const n = switch (self.files.items[fd].?) {
                 .read => |f| try f.read(buf),
@@ -648,8 +686,8 @@ const Vm = struct {
             return .{ .str = buf[0..n] };
         }
         if (std.mem.eql(u8, name, "write")) {
-            const fd: usize = @intCast(args.items[0].file);
-            const data: []const u8 = switch (args.items[1]) {
+            const fd: usize = @intCast(args[0].file);
+            const data: []const u8 = switch (args[1]) {
                 .str => |s| s,
                 .ptr => |p| p,
                 else => return error.TypeMismatch,
@@ -661,7 +699,7 @@ const Vm = struct {
             return .{ .int = @intCast(data.len) };
         }
         if (std.mem.eql(u8, name, "close")) {
-            const fd: usize = @intCast(args.items[0].file);
+            const fd: usize = @intCast(args[0].file);
             if (fd < self.files.items.len) {
                 if (self.files.items[fd]) |fh| {
                     switch (fh) {
@@ -674,21 +712,21 @@ const Vm = struct {
             return .void_;
         }
 
-        // user-defined function
         const func = self.findFunc(name) orelse return error.UndefinedFunction;
-        var new_env = std.StringHashMap(Value).init(self.alloc);
+        var new_env = Env.init(self.alloc);
+        try new_env.ensureTotalCapacity(func.params.items.len + 4);
         for (func.params.items, 0..) |param, i|
-            try new_env.put(param.name, args.items[i]);
+            try new_env.put(param.name, args[i]);
         return (try self.execBody(func.body.items, &new_env)) orelse .void_;
     }
 
-    fn execBody(self: *Vm, stmts: []const Stmt, env: *std.StringHashMap(Value)) anyerror!?Value {
+    fn execBody(self: *Vm, stmts: []const Stmt, env: *Env) anyerror!?Value {
         for (stmts) |*stmt|
             if (try self.execStmt(stmt, env)) |v| return v;
         return null;
     }
 
-    fn execStmt(self: *Vm, stmt: *const Stmt, env: *std.StringHashMap(Value)) anyerror!?Value {
+    fn execStmt(self: *Vm, stmt: *const Stmt, env: *Env) anyerror!?Value {
         switch (stmt.*) {
             .assign => |a| {
                 try env.put(a.reg, try self.evalExpr(a.expr, env));
@@ -722,19 +760,15 @@ const Vm = struct {
 fn run(program: *const Program, alloc: Allocator) !void {
     var vm = Vm.init(program, alloc);
     const main_func = vm.findFunc("main") orelse return error.NoMainFunction;
-    var env = std.StringHashMap(Value).init(alloc);
+    var env = Env.init(alloc);
     _ = try vm.execBody(main_func.body.items, &env);
 }
 
-// ─── Entry point ─────────────────────────────────────────────────────────────
-
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
-
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     const argv = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, argv);
 
     if (argv.len < 2) {
         std.debug.print("Usage: bear <file.bear>\n", .{});
@@ -746,13 +780,12 @@ pub fn main() !void {
         std.debug.print("Error reading {s}: {}\n", .{ path, e });
         std.process.exit(1);
     };
-    defer alloc.free(src);
 
     var tokens = tokenize(src, alloc) catch |e| {
         std.debug.print("Lex error: {}\n", .{e});
         std.process.exit(1);
     };
-    defer tokens.deinit(alloc);
+    _ = &tokens;
 
     const program = parse(tokens.items, alloc) catch |e| {
         std.debug.print("Parse error: {}\n", .{e});
