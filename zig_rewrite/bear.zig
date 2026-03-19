@@ -1,4 +1,4 @@
-//! Bear language VM - Zig rewrite (Zig 0.15.2)
+//! Bear VM - Zig rewrite (Zig 0.15.2)
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
