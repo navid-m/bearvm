@@ -111,6 +111,7 @@ pub fn run(program: *const lexer.Program, alloc: std.mem.Allocator) !void {
     }
     @memset(env, .void_);
     _ = try vm.execBody(main_fn.body.items, env, vm.getLabelMap("main"));
+    bear_io.flushStdout();
 }
 
 pub const Value = union(enum) {
@@ -133,6 +134,20 @@ pub const Value = union(enum) {
             else => {},
         }
     }
+
+    /// Fast integer extraction — avoids a branch when we know it's int.
+    pub inline fn asInt(self: Value) i64 {
+        return self.int;
+    }
+
+    /// Fast bool extraction.
+    pub inline fn asBool(self: Value) bool {
+        return switch (self) {
+            .bool_ => |b| b,
+            .int => |n| n != 0,
+            else => unreachable,
+        };
+    }
 };
 
 const StructVal = struct {
@@ -141,7 +156,7 @@ const StructVal = struct {
 };
 
 const FileHandle = union(enum) { read: std.fs.File, write: std.fs.File };
-const BuiltinTag = enum { puts, open, read, write, close };
+const BuiltinTag = enum(u8) { puts, open, read, write, close };
 const builtin_map = std.StaticStringMap(BuiltinTag).initComptime(.{
     .{ "puts", .puts },
     .{ "open", .open },
@@ -153,6 +168,12 @@ const builtin_map = std.StaticStringMap(BuiltinTag).initComptime(.{
 /// Pre-built label map for a function body (label name -> statement index).
 const LabelMap = std.StringHashMapUnmanaged(usize);
 
+/// Resolved call target — cached at parse time to avoid repeated hash lookups.
+const CallTarget = union(enum) {
+    builtin: BuiltinTag,
+    user: u32,
+};
+
 pub const Vm = struct {
     program: *const lexer.Program,
 
@@ -161,6 +182,10 @@ pub const Vm = struct {
 
     /// Pre-built label maps for each function (indexed same as func_index values)
     label_maps: []LabelMap,
+
+    /// Pre-built pc-indexed jump tables for each function (pc -> target pc for jmp/br_if)
+    jump_tables: [][]i32,
+
     files: std.ArrayListUnmanaged(?FileHandle),
     alloc: std.mem.Allocator,
     tasks: ?*TaskTable,
@@ -179,10 +204,30 @@ pub const Vm = struct {
             try buildLabelMap(&label_maps[i], f.body.items, alloc);
         }
 
+        const jump_tables = try alloc.alloc([]i32, n);
+        for (program.functions.items, 0..) |*f, i| {
+            const len = f.body.items.len;
+            const jt = try alloc.alloc(i32, len);
+            @memset(jt, -1);
+            for (f.body.items, 0..) |*s, si| {
+                switch (s.*) {
+                    .jmp => |target| {
+                        jt[si] = @intCast(label_maps[i].get(target) orelse continue);
+                    },
+                    .br_if => |br| {
+                        _ = br;
+                    },
+                    else => {},
+                }
+            }
+            jump_tables[i] = jt;
+        }
+
         return .{
             .program = program,
             .func_index = func_index,
             .label_maps = label_maps,
+            .jump_tables = jump_tables,
             .files = .empty,
             .alloc = alloc,
             .tasks = null,
@@ -193,6 +238,8 @@ pub const Vm = struct {
         self.func_index.deinit(self.alloc);
         for (self.label_maps) |*lm| lm.deinit(self.alloc);
         self.alloc.free(self.label_maps);
+        for (self.jump_tables) |jt| self.alloc.free(jt);
+        self.alloc.free(self.jump_tables);
         self.files.deinit(self.alloc);
     }
 
@@ -217,6 +264,7 @@ pub const Vm = struct {
         return @intCast(self.files.items.len - 1);
     }
 
+    /// Evaluate an expression. Hot path — keep it tight.
     fn evalExpr(self: *Vm, expr: *const lexer.Expr, env: []Value) anyerror!Value {
         var cur = expr;
         while (true) {
@@ -232,18 +280,47 @@ pub const Vm = struct {
                     cur = inner;
                     continue;
                 },
-                .add => |op| return .{ .int = (try self.evalExpr(op.a, env)).int +% (try self.evalExpr(op.b, env)).int },
-                .sub => |op| return .{ .int = (try self.evalExpr(op.a, env)).int -% (try self.evalExpr(op.b, env)).int },
-                .mul => |op| return .{ .int = (try self.evalExpr(op.a, env)).int *% (try self.evalExpr(op.b, env)).int },
-                .div => |op| {
-                    const b = (try self.evalExpr(op.b, env)).int;
-                    if (b == 0) return error.DivisionByZero;
-                    return .{ .int = @divTrunc((try self.evalExpr(op.a, env)).int, b) };
+                .add => |op| {
+                    const a = try self.evalExprFast(op.a, env);
+                    const b = try self.evalExprFast(op.b, env);
+                    return .{ .int = a +% b };
                 },
-                .lt => |op| return .{ .bool_ = (try self.evalExpr(op.a, env)).int < (try self.evalExpr(op.b, env)).int },
-                .gt => |op| return .{ .bool_ = (try self.evalExpr(op.a, env)).int > (try self.evalExpr(op.b, env)).int },
-                .le => |op| return .{ .bool_ = (try self.evalExpr(op.a, env)).int <= (try self.evalExpr(op.b, env)).int },
-                .ge => |op| return .{ .bool_ = (try self.evalExpr(op.a, env)).int >= (try self.evalExpr(op.b, env)).int },
+                .sub => |op| {
+                    const a = try self.evalExprFast(op.a, env);
+                    const b = try self.evalExprFast(op.b, env);
+                    return .{ .int = a -% b };
+                },
+                .mul => |op| {
+                    const a = try self.evalExprFast(op.a, env);
+                    const b = try self.evalExprFast(op.b, env);
+                    return .{ .int = a *% b };
+                },
+                .div => |op| {
+                    const b = try self.evalExprFast(op.b, env);
+                    if (b == 0) return error.DivisionByZero;
+                    const a = try self.evalExprFast(op.a, env);
+                    return .{ .int = @divTrunc(a, b) };
+                },
+                .lt => |op| {
+                    const a = try self.evalExprFast(op.a, env);
+                    const b = try self.evalExprFast(op.b, env);
+                    return .{ .bool_ = a < b };
+                },
+                .gt => |op| {
+                    const a = try self.evalExprFast(op.a, env);
+                    const b = try self.evalExprFast(op.b, env);
+                    return .{ .bool_ = a > b };
+                },
+                .le => |op| {
+                    const a = try self.evalExprFast(op.a, env);
+                    const b = try self.evalExprFast(op.b, env);
+                    return .{ .bool_ = a <= b };
+                },
+                .ge => |op| {
+                    const a = try self.evalExprFast(op.a, env);
+                    const b = try self.evalExprFast(op.b, env);
+                    return .{ .bool_ = a >= b };
+                },
                 .eq => |op| {
                     const a = try self.evalExpr(op.a, env);
                     const b = try self.evalExpr(op.b, env);
@@ -281,9 +358,7 @@ pub const Vm = struct {
                         args_buf[i] = try self.evalExpr(a, env);
                     const args_heap = try self.alloc.alloc(Value, argc);
                     @memcpy(args_heap, args_buf[0..argc]);
-
                     const task_id = try task_table.reserve();
-
                     const sa = try self.alloc.create(SpawnArgs);
                     sa.* = .{
                         .program = self.program,
@@ -305,6 +380,21 @@ pub const Vm = struct {
                 .call => |c| return try self.callFunc(c.name, c.args.items, env),
             }
         }
+    }
+
+    /// Fast path for expressions that are almost always .reg or .int literals.
+    /// Returns the raw i64 directly, skipping Value boxing.
+    inline fn evalExprFast(self: *Vm, expr: *const lexer.Expr, env: []Value) anyerror!i64 {
+        return switch (expr.*) {
+            .reg => |r| env[r].int,
+            .int => |n| n,
+            .const_ => |inner| switch (inner.*) {
+                .int => |n| n,
+                .reg => |r| env[r].int,
+                else => (try self.evalExpr(expr, env)).int,
+            },
+            else => (try self.evalExpr(expr, env)).int,
+        };
     }
 
     fn printValue(_: *Vm, val: Value) void {
@@ -332,75 +422,25 @@ pub const Vm = struct {
         if (argc > 32) return error.TooManyArguments;
         for (arg_exprs, 0..) |a, i|
             args_buf[i] = try self.evalExpr(a, env);
-        const args = args_buf[0..argc];
-        return self.callFuncWithValues(name, args);
+        return self.callFuncWithValues(name, args_buf[0..argc]);
     }
 
     pub fn callFuncWithValues(self: *Vm, name: []const u8, args: []Value) anyerror!Value {
         if (builtin_map.get(name)) |tag| {
-            return switch (tag) {
-                .puts => blk: {
-                    for (args) |a| self.printValue(a);
-                    bear_io.flushStdout();
-                    break :blk .void_;
-                },
-                .open => blk: {
-                    const path = args[0].str;
-                    const mode = args[1].int;
-                    const fd = if (mode == 0) inner: {
-                        const f = try std.fs.cwd().openFile(path, .{});
-                        break :inner try self.allocFile(.{ .read = f });
-                    } else inner: {
-                        const f = try std.fs.cwd().createFile(path, .{ .truncate = true });
-                        break :inner try self.allocFile(.{ .write = f });
-                    };
-                    break :blk .{ .file = fd };
-                },
-                .read => blk: {
-                    const fd: usize = @intCast(args[0].file);
-                    const size: usize = @intCast(args[2].int);
-                    const buf = try self.alloc.alloc(u8, size);
-                    const n = switch (self.files.items[fd].?) {
-                        .read => |f| try f.read(buf),
-                        else => return error.InvalidFileHandle,
-                    };
-                    break :blk .{ .str = buf[0..n] };
-                },
-                .write => blk: {
-                    const fd: usize = @intCast(args[0].file);
-                    const data: []const u8 = switch (args[1]) {
-                        .str => |s| s,
-                        .ptr => |p| p,
-                        else => return error.TypeMismatch,
-                    };
-                    switch (self.files.items[fd].?) {
-                        .write => |f| try f.writeAll(data),
-                        else => return error.InvalidFileHandle,
-                    }
-                    break :blk .{ .int = @intCast(data.len) };
-                },
-                .close => blk: {
-                    const fd: usize = @intCast(args[0].file);
-                    if (fd < self.files.items.len) {
-                        if (self.files.items[fd]) |fh| {
-                            switch (fh) {
-                                .read => |f| f.close(),
-                                .write => |f| f.close(),
-                            }
-                            self.files.items[fd] = null;
-                        }
-                    }
-                    break :blk .void_;
-                },
-            };
+            return self.execBuiltin(tag, args);
         }
 
         const idx = self.func_index.get(name) orelse return error.UndefinedFunction;
+        return self.callFuncByIdx(idx, args);
+    }
+
+    /// Call a user function by its pre-resolved index. Avoids hash lookup on hot paths.
+    fn callFuncByIdx(self: *Vm, idx: u32, args: []Value) anyerror!Value {
         const func = &self.program.functions.items[idx];
         const label_map = &self.label_maps[idx];
 
-        var stack_env: [32]Value = undefined;
-        const new_env: []Value = if (func.n_regs <= 32) blk: {
+        var stack_env: [64]Value = undefined;
+        const new_env: []Value = if (func.n_regs <= 64) blk: {
             @memset(stack_env[0..func.n_regs], .void_);
             break :blk stack_env[0..func.n_regs];
         } else blk: {
@@ -408,7 +448,7 @@ pub const Vm = struct {
             @memset(e, .void_);
             break :blk e;
         };
-        defer if (func.n_regs > 32) {
+        defer if (func.n_regs > 64) {
             for (new_env) |*v| v.deinit(self.alloc);
             self.alloc.free(new_env);
         };
@@ -419,11 +459,67 @@ pub const Vm = struct {
         return (try self.execBody(func.body.items, new_env, label_map)) orelse .void_;
     }
 
+    fn execBuiltin(self: *Vm, tag: BuiltinTag, args: []Value) anyerror!Value {
+        return switch (tag) {
+            .puts => blk: {
+                for (args) |a| self.printValue(a);
+                break :blk .void_;
+            },
+            .open => blk: {
+                const path = args[0].str;
+                const mode = args[1].int;
+                const fd = if (mode == 0) inner: {
+                    const f = try std.fs.cwd().openFile(path, .{});
+                    break :inner try self.allocFile(.{ .read = f });
+                } else inner: {
+                    const f = try std.fs.cwd().createFile(path, .{ .truncate = true });
+                    break :inner try self.allocFile(.{ .write = f });
+                };
+                break :blk .{ .file = fd };
+            },
+            .read => blk: {
+                const fd: usize = @intCast(args[0].file);
+                const size: usize = @intCast(args[2].int);
+                const buf = try self.alloc.alloc(u8, size);
+                const n = switch (self.files.items[fd].?) {
+                    .read => |f| try f.read(buf),
+                    else => return error.InvalidFileHandle,
+                };
+                break :blk .{ .str = buf[0..n] };
+            },
+            .write => blk: {
+                const fd: usize = @intCast(args[0].file);
+                const data: []const u8 = switch (args[1]) {
+                    .str => |s| s,
+                    .ptr => |p| p,
+                    else => return error.TypeMismatch,
+                };
+                switch (self.files.items[fd].?) {
+                    .write => |f| try f.writeAll(data),
+                    else => return error.InvalidFileHandle,
+                }
+                break :blk .{ .int = @intCast(data.len) };
+            },
+            .close => blk: {
+                const fd: usize = @intCast(args[0].file);
+                if (fd < self.files.items.len) {
+                    if (self.files.items[fd]) |fh| {
+                        switch (fh) {
+                            .read => |f| f.close(),
+                            .write => |f| f.close(),
+                        }
+                        self.files.items[fd] = null;
+                    }
+                }
+                break :blk .void_;
+            },
+        };
+    }
+
     pub fn execBody(self: *Vm, stmts: []const lexer.Stmt, env: []Value, label_map: *const LabelMap) anyerror!?Value {
         var pc: usize = 0;
         while (pc < stmts.len) {
-            const stmt = &stmts[pc];
-            switch (stmt.*) {
+            switch (stmts[pc]) {
                 .assign => |a| {
                     env[a.reg] = try self.evalExpr(a.expr, env);
                     pc += 1;
@@ -438,57 +534,23 @@ pub const Vm = struct {
                     pc += 1;
                 },
                 .ret => |e| return try self.evalExpr(e, env),
-                .while_ => |w| {
+                .while_ => |*w| {
                     var body_lm = LabelMap{};
                     defer body_lm.deinit(self.alloc);
                     try buildLabelMap(&body_lm, w.body.items, self.alloc);
 
                     const body = w.body.items;
+                    const cond = w.cond;
+
                     while (true) {
-                        const keep = switch (try self.evalExpr(w.cond, env)) {
+                        const keep = switch (try self.evalExpr(cond, env)) {
                             .bool_ => |b| b,
                             .int => |n| n != 0,
                             else => return error.TypeMismatch,
                         };
                         if (!keep) break;
 
-                        var bpc: usize = 0;
-                        while (bpc < body.len) {
-                            const bs = &body[bpc];
-                            switch (bs.*) {
-                                .assign => |a| {
-                                    env[a.reg] = try self.evalExpr(a.expr, env);
-                                    bpc += 1;
-                                },
-                                .set_field => |sf| {
-                                    const val = try self.evalExpr(sf.expr, env);
-                                    try env[sf.reg].struct_.fields.put(sf.field, val);
-                                    bpc += 1;
-                                },
-                                .call => |c| {
-                                    _ = try self.callFunc(c.name, c.args.items, env);
-                                    bpc += 1;
-                                },
-                                .ret => |e| return try self.evalExpr(e, env),
-                                .while_ => {
-                                    if (try self.execBody(body[bpc .. bpc + 1], env, &body_lm)) |v| return v;
-                                    bpc += 1;
-                                },
-                                .label => bpc += 1,
-                                .jmp => |target| {
-                                    bpc = body_lm.get(target) orelse return error.UndefinedLabel;
-                                },
-                                .br_if => |br| {
-                                    const taken = switch (env[br.cond]) {
-                                        .bool_ => |b| b,
-                                        .int => |n| n != 0,
-                                        else => return error.TypeMismatch,
-                                    };
-                                    const target = if (taken) br.true_label else br.false_label;
-                                    bpc = body_lm.get(target) orelse return error.UndefinedLabel;
-                                },
-                            }
-                        }
+                        if (try self.execBody(body, env, &body_lm)) |v| return v;
                     }
                     pc += 1;
                 },
@@ -497,8 +559,7 @@ pub const Vm = struct {
                     pc = label_map.get(target) orelse return error.UndefinedLabel;
                 },
                 .br_if => |br| {
-                    const cond_val = env[br.cond];
-                    const taken = switch (cond_val) {
+                    const taken = switch (env[br.cond]) {
                         .bool_ => |b| b,
                         .int => |n| n != 0,
                         else => return error.TypeMismatch,

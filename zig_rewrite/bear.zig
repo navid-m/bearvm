@@ -8,6 +8,7 @@ const bear_qbe = @import("qbe_emitter.zig");
 const bear_llvm = @import("llvm_emitter.zig");
 const bear_ast = @import("ast_printer.zig");
 const bear_jit = @import("jit.zig");
+const bear_io = @import("io.zig");
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -94,6 +95,7 @@ pub fn main() !void {
     };
 
     bear_vm.run(&program, alloc) catch |e| {
+        bear_io.flushStdout();
         std.debug.print("Runtime error: {}\n", .{e});
         std.process.exit(1);
     };

@@ -1,7 +1,7 @@
 @main(): int {
 	%i = const 0
 
-	while (lt %i, 10) {
+	while (lt %i, 10000) {
 		call puts("looping")
 		%i = add %i, 1
 	}
