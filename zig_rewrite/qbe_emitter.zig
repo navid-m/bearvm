@@ -1,20 +1,12 @@
 //! Emit QBE IL from a Bear program.
 //! QBE IL reference: https://c9x.me/compile/doc/il.html
-//!
-//! Performance notes:
-//!   - All output goes through a single growing ArrayList(u8); no intermediate buffers.
-//!   - Temp names are never heap-allocated: we write "%tN" inline via a stack buffer.
-//!   - The env[] array stores TmpId (u32 index) rather than heap strings, so register
-//!     reads are a free array lookup + inline format.
-//!   - String interning uses a flat slice scan (programs have few unique strings).
-//!   - Data section is emitted first in a separate pre-pass so we avoid the
-//!     save/restore out-buffer swap.
 
 const std = @import("std");
 const lexer = @import("lexer.zig");
 
 /// A temp variable is just its sequential index.  We format "%tN" inline.
 const TmpId = u32;
+
 /// Sentinel meaning "this register holds a parameter, use its name directly".
 const PARAM_BASE: TmpId = 0x8000_0000;
 
@@ -159,9 +151,9 @@ const Emitter = struct {
             .sub => |b| return self.emitBinOp(b, env, " =w sub "),
             .mul => |b| return self.emitBinOp(b, env, " =w mul "),
             .div => |b| return self.emitBinOp(b, env, " =w div "),
-            .lt  => |b| return self.emitBinOp(b, env, " =w csltw "),
-            .gt  => |b| return self.emitBinOp(b, env, " =w csgtw "),
-            .eq  => |b| return self.emitBinOp(b, env, " =w ceqw "),
+            .lt => |b| return self.emitBinOp(b, env, " =w csltw "),
+            .gt => |b| return self.emitBinOp(b, env, " =w csgtw "),
+            .eq => |b| return self.emitBinOp(b, env, " =w ceqw "),
             .alloc => |size_expr| {
                 const sv = try self.emitExpr(size_expr, env);
                 const t = self.fresh();
@@ -173,9 +165,7 @@ const Emitter = struct {
                 return .{ .tmp = t };
             },
             .named => |name| {
-                const val: i64 = if (name.len > 0 and name[0] == 'R') 0
-                    else if (name.len > 0 and name[0] == 'W') 1
-                    else return error.UnknownNamedConstant;
+                const val: i64 = if (name.len > 0 and name[0] == 'R') 0 else if (name.len > 0 and name[0] == 'W') 1 else return error.UnknownNamedConstant;
                 const t = self.fresh();
                 try self.out.appendSlice("  ");
                 try self.writeTmp(t);
@@ -196,7 +186,10 @@ const Emitter = struct {
                 for (fields, 0..) |fd, i| {
                     var fval: ?*const lexer.Expr = null;
                     for (sl.fields.items) |fi| {
-                        if (std.mem.eql(u8, fi.name, fd.name)) { fval = fi.expr; break; }
+                        if (std.mem.eql(u8, fi.name, fd.name)) {
+                            fval = fi.expr;
+                            break;
+                        }
                     }
                     const v = try self.emitExpr(fval orelse return error.MissingField, env);
                     const fptr = self.fresh();
@@ -234,9 +227,6 @@ const Emitter = struct {
     }
 
     fn isLongSlot(slot: Slot) bool {
-        // Heuristic: param slots that came from string-typed params are long.
-        // For simplicity we check if the slot is a tmp whose origin was a str expr —
-        // but we don't track that here. Instead callers pass the expr for type info.
         _ = slot;
         return false;
     }
@@ -245,10 +235,12 @@ const Emitter = struct {
         for (arg_exprs, 0..) |a, i| {
             const v = try self.emitExpr(a, env);
             if (i > 0) try self.out.appendSlice(", ");
-            // Determine QBE type: strings/ptrs are 'l', everything else 'w'
             const is_long = switch (a.*) {
                 .str => true,
-                .reg => |r| switch (env[r]) { .param => true, else => false },
+                .reg => |r| switch (env[r]) {
+                    .param => true,
+                    else => false,
+                },
                 else => false,
             };
             try self.out.appendSlice(if (is_long) "l " else "w ");
@@ -257,9 +249,6 @@ const Emitter = struct {
     }
 
     fn emitCallExpr(self: *Emitter, name: []const u8, arg_exprs: []*const lexer.Expr, env: []Slot) !Slot {
-        // Emit arg expressions first (they write to self.out), then the call line.
-        // We need to collect arg slots before writing the call instruction.
-        // Use a small stack buffer for up to 16 args.
         var slots_buf: [16]Slot = undefined;
         var long_buf: [16]bool = undefined;
         const argc = arg_exprs.len;
@@ -267,7 +256,10 @@ const Emitter = struct {
             slots_buf[i] = try self.emitExpr(a, env);
             long_buf[i] = switch (a.*) {
                 .str => true,
-                .reg => |r| switch (env[r]) { .param => true, else => false },
+                .reg => |r| switch (env[r]) {
+                    .param => true,
+                    else => false,
+                },
                 else => false,
             };
         }
@@ -297,7 +289,10 @@ const Emitter = struct {
             slots_buf[i] = try self.emitExpr(a, env);
             long_buf[i] = switch (a.*) {
                 .str => true,
-                .reg => |r| switch (env[r]) { .param => true, else => false },
+                .reg => |r| switch (env[r]) {
+                    .param => true,
+                    else => false,
+                },
                 else => false,
             };
         }
@@ -398,7 +393,6 @@ const Emitter = struct {
         }
         try self.out.appendSlice(") {\n@start\n");
 
-        // env: one Slot per register index
         const env = try self.alloc.alloc(Slot, func.n_regs);
         defer self.alloc.free(env);
         @memset(env, .undef);
@@ -406,7 +400,6 @@ const Emitter = struct {
 
         for (func.body.items) |*s| try self.emitStmt(s, env);
 
-        // Implicit return if the last instruction wasn't a ret/jmp
         const last = std.mem.trimRight(u8, self.out.items, "\n");
         const needs_ret = !std.mem.endsWith(u8, last, "ret") and
             !std.mem.endsWith(u8, last, "}") and
@@ -432,7 +425,7 @@ const Emitter = struct {
             for (e.content) |ch| {
                 switch (ch) {
                     '\n' => try self.out.appendSlice("\\n"),
-                    '"'  => try self.out.appendSlice("\\\""),
+                    '"' => try self.out.appendSlice("\\\""),
                     '\\' => try self.out.appendSlice("\\\\"),
                     else => try self.out.append(ch),
                 }
@@ -442,8 +435,6 @@ const Emitter = struct {
     }
 
     pub fn emitProgram(self: *Emitter, program: *const lexer.Program) ![]const u8 {
-        // Pre-size the output buffer to avoid repeated reallocations.
-        // Rough heuristic: ~64 bytes per statement.
         var stmt_count: usize = 0;
         for (program.functions.items) |*f| stmt_count += f.body.items.len;
         try self.out.ensureTotalCapacity(stmt_count * 64 + 256);
@@ -452,25 +443,13 @@ const Emitter = struct {
             try self.structs.put(self.alloc, s.name, s.fields.items);
         }
 
-        // First pass: collect string literals by doing a dry scan of the AST,
-        // then emit data section, then emit functions — all into one buffer.
-        // (We do a single forward pass; strings discovered during function emit
-        //  are appended to self.strings and written at the end via a second small pass.)
-        //
-        // Simpler approach that avoids the buffer-swap: emit functions into a
-        // temporary slice, prepend data section, then append functions.
-        // We keep the two-phase approach but avoid allocating a second ArrayList —
-        // instead we record the split point after the data section.
-
-        // Phase 1: emit all functions (strings get interned as we go)
         const func_start = self.out.items.len;
         for (program.functions.items) |*f| try self.emitFunction(f);
         const func_end = self.out.items.len;
 
-        // Phase 2: build data section into a temp buffer, then insert before functions
         const func_text = try self.alloc.dupe(u8, self.out.items[func_start..func_end]);
         defer self.alloc.free(func_text);
-        self.out.items.len = func_start; // truncate, keep capacity
+        self.out.items.len = func_start;
 
         try self.emitDataSection();
         if (self.strings.items.len > 0) try self.out.append('\n');
