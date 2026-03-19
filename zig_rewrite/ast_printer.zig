@@ -78,6 +78,8 @@ const Printer = struct {
             .div => |b| try self.printBinOp(alloc, "div", b, prefix, is_last, depth),
             .lt => |b| try self.printBinOp(alloc, "lt", b, prefix, is_last, depth),
             .gt => |b| try self.printBinOp(alloc, "gt", b, prefix, is_last, depth),
+            .le => |b| try self.printBinOp(alloc, "le", b, prefix, is_last, depth),
+            .ge => |b| try self.printBinOp(alloc, "ge", b, prefix, is_last, depth),
             .eq => |b| try self.printBinOp(alloc, "eq", b, prefix, is_last, depth),
             .call => |c| {
                 const label = try std.fmt.allocPrint(alloc, "call({s})", .{c.name});
@@ -105,6 +107,22 @@ const Printer = struct {
                     defer alloc.free(fcp);
                     try self.printExpr(alloc, fi.expr, fcp, true, depth + 2);
                 }
+            },
+            .spawn => |s| {
+                const label = try std.fmt.allocPrint(alloc, "spawn({s})", .{s.name});
+                defer alloc.free(label);
+                self.node(prefix, is_last, depth, label);
+                const cp = try childPrefix(alloc, prefix, is_last);
+                defer alloc.free(cp);
+                for (s.args.items, 0..) |arg, i| {
+                    const last = i == s.args.items.len - 1;
+                    try self.printExpr(alloc, arg, cp, last, depth + 1);
+                }
+            },
+            .sync => |reg| {
+                var buf: [32]u8 = undefined;
+                const s = try std.fmt.bufPrint(&buf, "sync(%{d})", .{reg});
+                self.node(prefix, is_last, depth, s);
             },
         }
     }

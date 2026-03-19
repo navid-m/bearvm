@@ -2,9 +2,118 @@ const std = @import("std");
 const lexer = @import("lexer.zig");
 const bear_io = @import("io.zig");
 
+// --- Task table for spawn/sync ---
+
+const TaskState = enum { running, done };
+
+const Task = struct {
+    thread: std.Thread,
+    state: TaskState,
+    result: Value,
+    err: ?anyerror,
+};
+
+pub const TaskTable = struct {
+    mutex: std.Thread.Mutex,
+    tasks: std.ArrayListUnmanaged(Task),
+    alloc: std.mem.Allocator,
+
+    pub fn init(alloc: std.mem.Allocator) TaskTable {
+        return .{ .mutex = .{}, .tasks = .empty, .alloc = alloc };
+    }
+
+    pub fn deinit(self: *TaskTable) void {
+        self.tasks.deinit(self.alloc);
+    }
+
+    /// Reserve a slot and return its ID (index). Caller fills in the thread after spawning.
+    pub fn reserve(self: *TaskTable) !u32 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const id: u32 = @intCast(self.tasks.items.len);
+        try self.tasks.append(self.alloc, .{
+            .thread = undefined,
+            .state = .running,
+            .result = .void_,
+            .err = null,
+        });
+        return id;
+    }
+
+    pub fn setThread(self: *TaskTable, id: u32, thread: std.Thread) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.tasks.items[id].thread = thread;
+    }
+
+    pub fn complete(self: *TaskTable, id: u32, result: Value, err: ?anyerror) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        // Simple values (int, bool, void) are safe to copy directly.
+        // For this VM, spawned tasks return numeric results (fib returns int).
+        self.tasks.items[id].result = result;
+        self.tasks.items[id].err = err;
+        self.tasks.items[id].state = .done;
+    }
+
+    /// Join the thread and return the result (blocks until done).
+    pub fn join(self: *TaskTable, id: u32) !Value {
+        // Grab the thread handle (it's set before we can call join)
+        self.mutex.lock();
+        const thread = self.tasks.items[id].thread;
+        self.mutex.unlock();
+        thread.join();
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const task = &self.tasks.items[id];
+        if (task.err) |e| return e;
+        return task.result;
+    }
+};
+
+// --- Thread entry point ---
+
+const SpawnArgs = struct {
+    program: *const lexer.Program,
+    func_name: []const u8,
+    args: []Value,
+    task_id: u32,
+    tasks: *TaskTable,
+    alloc: std.mem.Allocator,
+};
+
+fn spawnEntry(sa: *SpawnArgs) void {
+    // Each spawned task gets its own arena so allocations are thread-safe
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    defer sa.alloc.destroy(sa);
+    var vm = Vm.init(sa.program, alloc) catch |e| {
+        sa.tasks.complete(sa.task_id, .void_, e);
+        sa.alloc.free(sa.args);
+        return;
+    };
+    defer vm.deinit();
+    vm.tasks = sa.tasks;
+
+    const result = vm.callFuncWithValues(sa.func_name, sa.args) catch |e| {
+        sa.tasks.complete(sa.task_id, .void_, e);
+        sa.alloc.free(sa.args);
+        return;
+    };
+    sa.alloc.free(sa.args);
+    sa.tasks.complete(sa.task_id, result, null);
+}
+
 pub fn run(program: *const lexer.Program, alloc: std.mem.Allocator) !void {
+    var tasks = TaskTable.init(alloc);
+    defer tasks.deinit();
+
     var vm = try Vm.init(program, alloc);
     defer vm.deinit();
+    vm.tasks = &tasks;
+
     const main_fn = vm.findFunc("main") orelse return error.NoMainFunction;
     const env = try alloc.alloc(Value, main_fn.n_regs);
     defer {
@@ -57,6 +166,7 @@ pub const Vm = struct {
     func_index: std.StringHashMapUnmanaged(u32),
     files: std.ArrayListUnmanaged(?FileHandle),
     alloc: std.mem.Allocator,
+    tasks: ?*TaskTable,
 
     pub fn init(program: *const lexer.Program, alloc: std.mem.Allocator) !Vm {
         var func_index = std.StringHashMapUnmanaged(u32){};
@@ -68,6 +178,7 @@ pub const Vm = struct {
             .func_index = func_index,
             .files = .empty,
             .alloc = alloc,
+            .tasks = null,
         };
     }
 
@@ -117,6 +228,8 @@ pub const Vm = struct {
                 },
                 .lt => |op| return .{ .bool_ = (try self.evalExpr(op.a, env)).int < (try self.evalExpr(op.b, env)).int },
                 .gt => |op| return .{ .bool_ = (try self.evalExpr(op.a, env)).int > (try self.evalExpr(op.b, env)).int },
+                .le => |op| return .{ .bool_ = (try self.evalExpr(op.a, env)).int <= (try self.evalExpr(op.b, env)).int },
+                .ge => |op| return .{ .bool_ = (try self.evalExpr(op.a, env)).int >= (try self.evalExpr(op.b, env)).int },
                 .eq => |op| {
                     const a = try self.evalExpr(op.a, env);
                     const b = try self.evalExpr(op.b, env);
@@ -144,6 +257,38 @@ pub const Vm = struct {
                         if (name[0] == 'W') return .{ .int = 1 };
                     }
                     return error.UnknownNamedConstant;
+                },
+                .spawn => |s| {
+                    const task_table = self.tasks orelse return error.NoTaskTable;
+                    // Evaluate args in the current thread
+                    var args_buf: [32]Value = undefined;
+                    const argc = s.args.items.len;
+                    if (argc > 32) return error.TooManyArguments;
+                    for (s.args.items, 0..) |a, i|
+                        args_buf[i] = try self.evalExpr(a, env);
+                    // Copy args to heap for the new thread
+                    const args_heap = try self.alloc.alloc(Value, argc);
+                    @memcpy(args_heap, args_buf[0..argc]);
+
+                    const task_id = try task_table.reserve();
+
+                    const sa = try self.alloc.create(SpawnArgs);
+                    sa.* = .{
+                        .program = self.program,
+                        .func_name = s.name,
+                        .args = args_heap,
+                        .task_id = task_id,
+                        .tasks = task_table,
+                        .alloc = self.alloc,
+                    };
+                    const thread = try std.Thread.spawn(.{}, spawnEntry, .{sa});
+                    task_table.setThread(task_id, thread);
+                    return .{ .int = @intCast(task_id) };
+                },
+                .sync => |reg| {
+                    const task_table = self.tasks orelse return error.NoTaskTable;
+                    const task_id: u32 = @intCast(env[reg].int);
+                    return try task_table.join(task_id);
                 },
                 .call => |c| return try self.callFunc(c.name, c.args.items, env),
             }
@@ -176,6 +321,10 @@ pub const Vm = struct {
         for (arg_exprs, 0..) |a, i|
             args_buf[i] = try self.evalExpr(a, env);
         const args = args_buf[0..argc];
+        return self.callFuncWithValues(name, args);
+    }
+
+    pub fn callFuncWithValues(self: *Vm, name: []const u8, args: []Value) anyerror!Value {
 
         if (builtin_map.get(name)) |tag| {
             return switch (tag) {

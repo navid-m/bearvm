@@ -125,6 +125,8 @@ const Parser = struct {
             .kw_div => .{ .div = payload },
             .kw_lt => .{ .lt = payload },
             .kw_gt => .{ .gt = payload },
+            .kw_le => .{ .le = payload },
+            .kw_ge => .{ .ge = payload },
             .kw_eq => .{ .eq = payload },
             else => unreachable,
         });
@@ -142,6 +144,8 @@ const Parser = struct {
             .kw_div => try self.parseBinOp(rm, .kw_div),
             .kw_lt => try self.parseBinOp(rm, .kw_lt),
             .kw_gt => try self.parseBinOp(rm, .kw_gt),
+            .kw_le => try self.parseBinOp(rm, .kw_le),
+            .kw_ge => try self.parseBinOp(rm, .kw_ge),
             .kw_eq => try self.parseBinOp(rm, .kw_eq),
             .kw_call => blk: {
                 _ = self.advance();
@@ -151,6 +155,22 @@ const Parser = struct {
                     else => return error.ExpectedFuncName,
                 };
                 break :blk try self.box(.{ .call = .{ .name = name, .args = try self.parseArgs(rm) } });
+            },
+            .kw_spawn => blk: {
+                _ = self.advance(); // consume 'spawn'
+                _ = try self.expectTag(.kw_call); // expect 'call'
+                const name = switch (self.advance()) {
+                    .ident => |s| s,
+                    .func => |s| s,
+                    else => return error.ExpectedFuncName,
+                };
+                break :blk try self.box(.{ .spawn = .{ .name = name, .args = try self.parseArgs(rm) } });
+            },
+            .kw_sync => blk: {
+                _ = self.advance(); // consume 'sync'
+                const r = try self.expectReg();
+                const idx = try rm.intern(r);
+                break :blk try self.box(.{ .sync = idx });
             },
             .kw_alloc => blk: {
                 _ = self.advance();

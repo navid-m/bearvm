@@ -1,0 +1,34 @@
+@fib(%n: int): int {
+entry:
+    %cond0 = le %n, 1
+    br_if %cond0, base_case, recursive_case
+
+base_case:
+    ret %n
+
+recursive_case:
+    %n1 = sub %n, 1
+    %n2 = sub %n, 2
+
+    %task1 = spawn call fib(%n1)
+    %task2 = spawn call fib(%n2)
+
+    %r1 = sync %task1
+    %r2 = sync %task2
+
+    %res = add %r1, %r2
+    ret %res
+}
+
+@main(): int {
+entry:
+    %n = const 10
+
+    %task_fib = spawn call fib(%n)
+    %result = sync %task_fib
+
+    %task_print = spawn call puts(%result)
+    %r = sync %task_print
+
+    ret 0
+}
