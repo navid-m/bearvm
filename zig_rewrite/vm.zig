@@ -111,7 +111,6 @@ pub fn run(program: *const lexer.Program, alloc: std.mem.Allocator) !void {
     }
     @memset(env, .void_);
     _ = try vm.execBody(main_fn.body.items, env, vm.getLabelMap("main"));
-    bear_io.flushStdout();
 }
 
 pub const Value = union(enum) {
@@ -156,13 +155,14 @@ const StructVal = struct {
 };
 
 const FileHandle = union(enum) { read: std.fs.File, write: std.fs.File };
-const BuiltinTag = enum(u8) { puts, open, read, write, close };
+const BuiltinTag = enum(u8) { puts, open, read, write, close, flush };
 const builtin_map = std.StaticStringMap(BuiltinTag).initComptime(.{
     .{ "puts", .puts },
     .{ "open", .open },
     .{ "read", .read },
     .{ "write", .write },
     .{ "close", .close },
+    .{ "flush", .flush },
 });
 
 /// Pre-built label map for a function body (label name -> statement index).
@@ -511,6 +511,10 @@ pub const Vm = struct {
                         self.files.items[fd] = null;
                     }
                 }
+                break :blk .void_;
+            },
+            .flush => blk: {
+                bear_io.flushStdout();
                 break :blk .void_;
             },
         };

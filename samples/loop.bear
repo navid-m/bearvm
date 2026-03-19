@@ -6,5 +6,6 @@
 		%i = add %i, 1
 	}
 
+	call flush()
 	ret 0
 }

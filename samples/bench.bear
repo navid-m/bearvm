@@ -30,5 +30,6 @@
         %iter = add %iter, 1
     }
     call puts("Done.")
+    call flush()
     ret 0
 }
