@@ -81,10 +81,10 @@ fn stp_pre(xn: u5, xm: u5, imm7: i7) u32 {
         @as(u32, xn);
 }
 
-/// STP Xn, Xm, [SP, #-frame_size]!   — push pair onto stack
+/// STP Xn, Xm, [SP, #-frame_size]! — push pair onto stack
 /// We use a dedicated helper that encodes correctly.
 fn stp_callee(xn: u5, xm: u5, slot: u6) u32 {
-    const off: u7 = @intCast(slot * 2); // *2 because unit is 8 bytes, *16 = *2*8
+    const off: u7 = @intCast(slot * 2);
     return (0b1010_1001_00 << 22) | (@as(u32, off) << 15) |
         (@as(u32, xm) << 10) | (31 << 5) | @as(u32, xn);
 }
