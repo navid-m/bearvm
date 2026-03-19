@@ -1,6 +1,3 @@
-; Heavy benchmark: stress the interpreter's inner loop with large iteration counts.
-; sum_to does 1M iterations, fib(70) is called 10000 times.
-
 @sum_to(%n: int): int {
     %i = const 0
     %acc = const 0
@@ -25,16 +22,13 @@
 }
 
 @main(): int {
-    ; sum 1..1000000 — 1M loop iterations of arithmetic
     %s = call sum_to(1000000)
-
-    ; fib(70) called 10000 times — stresses function call + loop overhead
     %iter = const 0
     %result = const 0
     while (lt %iter, 10000) {
         %result = call fib(70)
         %iter = add %iter, 1
     }
-
+    call puts("Done.")
     ret 0
 }

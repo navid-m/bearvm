@@ -24,6 +24,10 @@ const RegMap = struct {
         return .{ .names = .empty, .alloc = alloc };
     }
 
+    fn deinit(self: *RegMap) void {
+        self.names.deinit(self.alloc);
+    }
+
     fn intern(self: *RegMap, name: []const u8) !lexer.RegIdx {
         for (self.names.items, 0..) |n, i|
             if (std.mem.eql(u8, n, name)) return @intCast(i);
@@ -262,6 +266,7 @@ const Parser = struct {
     fn parseFunction(self: *Parser) ParseError!lexer.Function {
         const name = try self.expectFunc();
         var rm = RegMap.init(self.alloc);
+        defer rm.deinit();
 
         var params: std.ArrayList(lexer.Param) = .empty;
         if (std.meta.activeTag(self.peek()) == .lparen) {
@@ -304,12 +309,15 @@ const Parser = struct {
                 else => return error.UnexpectedTopLevel,
             }
         }
-        return .{ .structs = structs, .functions = functions };
+        return .{ .structs = structs, .functions = functions, .slab = undefined, .tokens = undefined };
     }
 };
 
-pub fn parse(tokens: []const lexer.Token, alloc: std.mem.Allocator) !lexer.Program {
+pub fn parse(tokens: []const lexer.Token, token_list: std.ArrayList(lexer.Token), alloc: std.mem.Allocator) !lexer.Program {
     var slab = try lexer.ExprSlab.init(alloc, tokens.len / 3 + 64);
     var p = Parser{ .tokens = tokens, .pos = 0, .alloc = alloc, .slab = &slab };
-    return p.parseProgram();
+    var prog = try p.parseProgram();
+    prog.slab = slab;
+    prog.tokens = token_list;
+    return prog;
 }

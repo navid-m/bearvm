@@ -8,8 +8,13 @@ const bear_vm = @import("vm.zig");
 
 fn run(program: *const lexer.Program, alloc: std.mem.Allocator) !void {
     var vm = try bear_vm.Vm.init(program, alloc);
+    defer vm.deinit();
     const main_fn = vm.findFunc("main") orelse return error.NoMainFunction;
     const env = try alloc.alloc(bear_vm.Value, main_fn.n_regs);
+    defer {
+        for (env) |*v| v.deinit(alloc);
+        alloc.free(env);
+    }
     @memset(env, .void_);
     _ = try vm.execBody(main_fn.body.items, env);
 }
@@ -30,13 +35,12 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    var tokens = lexer.tokenize(src, alloc) catch |e| {
+    const tokens = lexer.tokenize(src, alloc) catch |e| {
         std.debug.print("Lex error: {}\n", .{e});
         std.process.exit(1);
     };
-    _ = &tokens;
 
-    const program = bear_parser.parse(tokens.items, alloc) catch |e| {
+    const program = bear_parser.parse(tokens.items, tokens, alloc) catch |e| {
         std.debug.print("Parse error: {}\n", .{e});
         std.process.exit(1);
     };
@@ -54,15 +58,23 @@ fn testLex(src: []const u8, alloc: std.mem.Allocator) ![]lexer.Token {
 
 fn testParse(src: []const u8, alloc: std.mem.Allocator) !lexer.Program {
     const list = try lexer.tokenize(src, alloc);
-    return bear_parser.parse(list.items, alloc);
+    errdefer lexer.freeTokens(list, alloc);
+    return bear_parser.parse(list.items, list, alloc);
 }
 
 fn evalMain(src: []const u8, alloc: std.mem.Allocator) !bear_vm.Value {
     const list = try lexer.tokenize(src, alloc);
-    const prog = try bear_parser.parse(list.items, alloc);
+    errdefer lexer.freeTokens(list, alloc);
+    var prog = try bear_parser.parse(list.items, list, alloc);
+    defer prog.deinit(alloc);
     var vm = try bear_vm.Vm.init(&prog, alloc);
+    defer vm.deinit();
     const main_fn = vm.findFunc("main") orelse return error.NoMainFunction;
     const env = try alloc.alloc(bear_vm.Value, main_fn.n_regs);
+    defer {
+        for (env) |*v| v.deinit(alloc);
+        alloc.free(env);
+    }
     @memset(env, .void_);
     return (try vm.execBody(main_fn.body.items, env)) orelse .void_;
 }
@@ -131,14 +143,14 @@ test "lexer: integer literals" {
 test "lexer: string literal" {
     const alloc = std.testing.allocator;
     const toks = try testLex("\"hello world\"", alloc);
-    defer alloc.free(toks);
+    defer lexer.freeTokenSlice(toks, alloc);
     try std.testing.expectEqualStrings("hello world", toks[0].str);
 }
 
 test "lexer: string escape sequences" {
     const alloc = std.testing.allocator;
     const toks = try testLex("\"line1\\nline2\"", alloc);
-    defer alloc.free(toks);
+    defer lexer.freeTokenSlice(toks, alloc);
     try std.testing.expectEqualStrings("line1\nline2", toks[0].str);
 }
 
@@ -180,7 +192,8 @@ test "lexer: unexpected char is error" {
 
 test "parser: minimal void function" {
     const alloc = std.testing.allocator;
-    const prog = try testParse("@other_func: void { ret 0 }", alloc);
+    var prog = try testParse("@other_func: void { ret 0 }", alloc);
+    defer prog.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), prog.functions.items.len);
     try std.testing.expectEqualStrings("other_func", prog.functions.items[0].name);
     try std.testing.expectEqual(lexer.Ty.void_, prog.functions.items[0].ret_ty);
@@ -189,13 +202,15 @@ test "parser: minimal void function" {
 
 test "parser: function with empty parens and return type" {
     const alloc = std.testing.allocator;
-    const prog = try testParse("@main(): int { ret 0 }", alloc);
+    var prog = try testParse("@main(): int { ret 0 }", alloc);
+    defer prog.deinit(alloc);
     try std.testing.expectEqual(lexer.Ty.int, prog.functions.items[0].ret_ty);
 }
 
 test "parser: call without args" {
     const alloc = std.testing.allocator;
-    const prog = try testParse("@main(): int { call other_func ret 0 }", alloc);
+    var prog = try testParse("@main(): int { call other_func ret 0 }", alloc);
+    defer prog.deinit(alloc);
     const stmt = prog.functions.items[0].body.items[0];
     try std.testing.expectEqualStrings("other_func", stmt.call.name);
     try std.testing.expectEqual(@as(usize, 0), stmt.call.args.items.len);
@@ -203,7 +218,8 @@ test "parser: call without args" {
 
 test "parser: call with args" {
     const alloc = std.testing.allocator;
-    const prog = try testParse("@main(): int { call puts(\"hi\") ret 0 }", alloc);
+    var prog = try testParse("@main(): int { call puts(\"hi\") ret 0 }", alloc);
+    defer prog.deinit(alloc);
     const stmt = prog.functions.items[0].body.items[0];
     try std.testing.expectEqualStrings("puts", stmt.call.name);
     try std.testing.expectEqual(@as(usize, 1), stmt.call.args.items.len);
@@ -211,35 +227,40 @@ test "parser: call with args" {
 
 test "parser: assign const int" {
     const alloc = std.testing.allocator;
-    const prog = try testParse("@main(): int { %x = const 42 ret 0 }", alloc);
+    var prog = try testParse("@main(): int { %x = const 42 ret 0 }", alloc);
+    defer prog.deinit(alloc);
     const stmt = prog.functions.items[0].body.items[0];
     try std.testing.expectEqual(@as(lexer.RegIdx, 0), stmt.assign.reg);
 }
 
 test "parser: assign add expr" {
     const alloc = std.testing.allocator;
-    const prog = try testParse("@main(): int { %r = add %a, %b ret 0 }", alloc);
+    var prog = try testParse("@main(): int { %r = add %a, %b ret 0 }", alloc);
+    defer prog.deinit(alloc);
     const stmt = prog.functions.items[0].body.items[0];
     try std.testing.expect(std.meta.activeTag(stmt.assign.expr.*) == .add);
 }
 
 test "parser: while loop" {
     const alloc = std.testing.allocator;
-    const prog = try testParse("@main(): int { while (lt %i, 10) { call puts(\"x\") } ret 0 }", alloc);
+    var prog = try testParse("@main(): int { while (lt %i, 10) { call puts(\"x\") } ret 0 }", alloc);
+    defer prog.deinit(alloc);
     const stmt = prog.functions.items[0].body.items[0];
     try std.testing.expect(std.meta.activeTag(stmt) == .while_);
 }
 
 test "parser: set field" {
     const alloc = std.testing.allocator;
-    const prog = try testParse("@main(): int { set %p.age = const 1 ret 0 }", alloc);
+    var prog = try testParse("@main(): int { set %p.age = const 1 ret 0 }", alloc);
+    defer prog.deinit(alloc);
     const stmt = prog.functions.items[0].body.items[0];
     try std.testing.expectEqualStrings("age", stmt.set_field.field);
 }
 
 test "parser: field access expr" {
     const alloc = std.testing.allocator;
-    const prog = try testParse("@main(): int { %v = %p.name ret 0 }", alloc);
+    var prog = try testParse("@main(): int { %v = %p.name ret 0 }", alloc);
+    defer prog.deinit(alloc);
     const stmt = prog.functions.items[0].body.items[0];
     try std.testing.expect(std.meta.activeTag(stmt.assign.expr.*) == .field);
     try std.testing.expectEqualStrings("name", stmt.assign.expr.field.field);
@@ -247,14 +268,16 @@ test "parser: field access expr" {
 
 test "parser: alloc expr" {
     const alloc = std.testing.allocator;
-    const prog = try testParse("@main(): int { %buf = alloc 1024 ret 0 }", alloc);
+    var prog = try testParse("@main(): int { %buf = alloc 1024 ret 0 }", alloc);
+    defer prog.deinit(alloc);
     const stmt = prog.functions.items[0].body.items[0];
     try std.testing.expect(std.meta.activeTag(stmt.assign.expr.*) == .alloc);
 }
 
 test "parser: struct definition" {
     const alloc = std.testing.allocator;
-    const prog = try testParse("struct Person { name: string age: int }", alloc);
+    var prog = try testParse("struct Person { name: string age: int }", alloc);
+    defer prog.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), prog.structs.items.len);
     try std.testing.expectEqualStrings("Person", prog.structs.items[0].name);
     try std.testing.expectEqual(@as(usize, 2), prog.structs.items[0].fields.items.len);
@@ -262,14 +285,16 @@ test "parser: struct definition" {
 
 test "parser: struct literal in assign" {
     const alloc = std.testing.allocator;
-    const prog = try testParse("@main(): int { %p = Person { name: \"Alice\" age: 25 } ret 0 }", alloc);
+    var prog = try testParse("@main(): int { %p = Person { name: \"Alice\" age: 25 } ret 0 }", alloc);
+    defer prog.deinit(alloc);
     const stmt = prog.functions.items[0].body.items[0];
     try std.testing.expect(std.meta.activeTag(stmt.assign.expr.*) == .struct_lit);
 }
 
 test "parser: named constant" {
     const alloc = std.testing.allocator;
-    const prog = try testParse("@main(): int { %m = READ ret 0 }", alloc);
+    var prog = try testParse("@main(): int { %m = READ ret 0 }", alloc);
+    defer prog.deinit(alloc);
     const stmt = prog.functions.items[0].body.items[0];
     try std.testing.expect(std.meta.activeTag(stmt.assign.expr.*) == .named);
     try std.testing.expectEqualStrings("READ", stmt.assign.expr.named);
@@ -402,8 +427,10 @@ test "interpreter: alloc returns ptr" {
 test "interpreter: no main is error" {
     const alloc = std.testing.allocator;
     const list = try lexer.tokenize("@other: void { ret 0 }", alloc);
-    const prog = try bear_parser.parse(list.items, alloc);
+    var prog = try bear_parser.parse(list.items, list, alloc);
+    defer prog.deinit(alloc);
     var vm = try bear_vm.Vm.init(&prog, alloc);
+    defer vm.deinit();
     try std.testing.expect(vm.findFunc("main") == null);
 }
 

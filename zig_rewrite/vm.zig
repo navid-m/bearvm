@@ -10,6 +10,18 @@ pub const Value = union(enum) {
     file: i64,
     void_,
     struct_: StructVal,
+
+    pub fn deinit(self: *Value, alloc: std.mem.Allocator) void {
+        switch (self.*) {
+            .ptr => |p| alloc.free(p),
+            .struct_ => |*sv| {
+                var it = sv.fields.iterator();
+                while (it.next()) |entry| entry.value_ptr.deinit(alloc);
+                sv.fields.deinit();
+            },
+            else => {},
+        }
+    }
 };
 
 const StructVal = struct {
@@ -44,6 +56,11 @@ pub const Vm = struct {
             .files = .empty,
             .alloc = alloc,
         };
+    }
+
+    pub fn deinit(self: *Vm) void {
+        self.func_index.deinit(self.alloc);
+        self.files.deinit(self.alloc);
     }
 
     pub fn findFunc(self: *Vm, name: []const u8) ?*const lexer.Function {
@@ -215,6 +232,10 @@ pub const Vm = struct {
             const e = try self.alloc.alloc(Value, func.n_regs);
             @memset(e, .void_);
             break :blk e;
+        };
+        defer if (func.n_regs > 32) {
+            for (new_env) |*v| v.deinit(self.alloc);
+            self.alloc.free(new_env);
         };
 
         for (func.params.items, 0..) |param, i|

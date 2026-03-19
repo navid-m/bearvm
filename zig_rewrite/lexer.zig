@@ -99,8 +99,24 @@ pub fn keywordToken(word: []const u8) ?Token {
     return null;
 }
 
+pub fn freeTokenSlice(tokens: []Token, alloc: std.mem.Allocator) void {
+    for (tokens) |tok| {
+        if (tok == .str) alloc.free(tok.str);
+    }
+    alloc.free(tokens);
+}
+
+pub fn freeTokens(tokens: std.ArrayList(Token), alloc: std.mem.Allocator) void {
+    for (tokens.items) |tok| {
+        if (tok == .str) alloc.free(tok.str);
+    }
+    var t = tokens;
+    t.deinit(alloc);
+}
+
 pub fn tokenize(src: []const u8, alloc: std.mem.Allocator) !std.ArrayList(Token) {
     var tokens = try std.ArrayList(Token).initCapacity(alloc, src.len / 4 + 8);
+    errdefer freeTokens(tokens, alloc);
     var i: usize = 0;
     while (i < src.len) {
         const c = src[i];
@@ -205,7 +221,14 @@ pub fn tokenize(src: []const u8, alloc: std.mem.Allocator) !std.ArrayList(Token)
 }
 
 pub const Ty = enum { int, void_, str, bool_, named };
-pub const StructDef = struct { name: []const u8, fields: std.ArrayList(StructField) };
+pub const StructDef = struct {
+    name: []const u8,
+    fields: std.ArrayList(StructField),
+
+    pub fn deinit(self: *StructDef, alloc: std.mem.Allocator) void {
+        self.fields.deinit(alloc);
+    }
+};
 pub const StructField = struct { name: []const u8, ty: Ty };
 pub const RegIdx = u16;
 pub const Function = struct {
@@ -214,16 +237,47 @@ pub const Function = struct {
     ret_ty: Ty,
     body: std.ArrayList(Stmt),
     n_regs: u16,
+
+    pub fn deinit(self: *Function, alloc: std.mem.Allocator) void {
+        for (self.body.items) |*s| s.deinit(alloc);
+        self.body.deinit(alloc);
+        self.params.deinit(alloc);
+    }
 };
 
 pub const Param = struct { name: []const u8, ty: Ty, idx: RegIdx };
-pub const Program = struct { structs: std.ArrayList(StructDef), functions: std.ArrayList(Function) };
+pub const Program = struct {
+    structs: std.ArrayList(StructDef),
+    functions: std.ArrayList(Function),
+    slab: ExprSlab,
+    tokens: std.ArrayList(Token),
+
+    pub fn deinit(self: *Program, alloc: std.mem.Allocator) void {
+        for (self.structs.items) |*s| s.deinit(alloc);
+        self.structs.deinit(alloc);
+        for (self.functions.items) |*f| f.deinit(alloc);
+        self.functions.deinit(alloc);
+        self.slab.deinit(alloc);
+        freeTokens(self.tokens, alloc);
+    }
+};
 pub const Stmt = union(enum) {
     assign: struct { reg: RegIdx, expr: *Expr },
     set_field: struct { reg: RegIdx, field: []const u8, expr: *Expr },
     call: struct { name: []const u8, args: std.ArrayList(*Expr) },
     ret: *Expr,
     while_: struct { cond: *Expr, body: std.ArrayList(Stmt) },
+
+    pub fn deinit(self: *Stmt, alloc: std.mem.Allocator) void {
+        switch (self.*) {
+            .call => |*c| c.args.deinit(alloc),
+            .while_ => |*w| {
+                for (w.body.items) |*s| s.deinit(alloc);
+                w.body.deinit(alloc);
+            },
+            else => {},
+        }
+    }
 };
 
 pub const BinOp = struct { a: *Expr, b: *Expr };
@@ -253,6 +307,10 @@ pub const ExprSlab = struct {
 
     pub fn init(alloc: std.mem.Allocator, cap: usize) !ExprSlab {
         return .{ .buf = try alloc.alloc(Expr, cap), .used = 0 };
+    }
+
+    pub fn deinit(self: *ExprSlab, alloc: std.mem.Allocator) void {
+        alloc.free(self.buf);
     }
 
     pub fn alloc_node(self: *ExprSlab, e: Expr) error{OutOfMemory}!*Expr {
