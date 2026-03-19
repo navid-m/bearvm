@@ -14,8 +14,10 @@ const PARAM_BASE: TmpId = 0x8000_0000;
 const Slot = union(enum) {
     /// Result of a temp: write "%tN"
     tmp: TmpId,
+
     /// Function parameter: write "%<name>"
     param: []const u8,
+
     /// Unset
     undef,
 };
