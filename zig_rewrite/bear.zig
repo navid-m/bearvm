@@ -7,7 +7,7 @@ const bear_parser = @import("parser.zig");
 const bear_vm = @import("vm.zig");
 
 fn run(program: *const lexer.Program, alloc: std.mem.Allocator) !void {
-    var vm = bear_vm.Vm.init(program, alloc);
+    var vm = try bear_vm.Vm.init(program, alloc);
     const main_fn = vm.findFunc("main") orelse return error.NoMainFunction;
     const env = try alloc.alloc(bear_vm.Value, main_fn.n_regs);
     @memset(env, .void_);
@@ -60,7 +60,7 @@ fn testParse(src: []const u8, alloc: std.mem.Allocator) !lexer.Program {
 fn evalMain(src: []const u8, alloc: std.mem.Allocator) !bear_vm.Value {
     const list = try lexer.tokenize(src, alloc);
     const prog = try bear_parser.parse(list.items, alloc);
-    var vm = bear_vm.Vm.init(&prog, alloc);
+    var vm = try bear_vm.Vm.init(&prog, alloc);
     const main_fn = vm.findFunc("main") orelse return error.NoMainFunction;
     const env = try alloc.alloc(bear_vm.Value, main_fn.n_regs);
     @memset(env, .void_);
@@ -403,7 +403,7 @@ test "interpreter: no main is error" {
     const alloc = std.testing.allocator;
     const list = try lexer.tokenize("@other: void { ret 0 }", alloc);
     const prog = try bear_parser.parse(list.items, alloc);
-    var vm = bear_vm.Vm.init(&prog, alloc);
+    var vm = try bear_vm.Vm.init(&prog, alloc);
     try std.testing.expect(vm.findFunc("main") == null);
 }
 

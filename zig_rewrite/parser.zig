@@ -130,7 +130,7 @@ const Parser = struct {
         return switch (self.peek()) {
             .kw_const => blk: {
                 _ = self.advance();
-                break :blk try self.box(.{ .const_ = try self.parseExpr(rm) });
+                break :blk try self.parseExpr(rm);
             },
             .kw_add => try self.parseBinOp(rm, .kw_add),
             .kw_sub => try self.parseBinOp(rm, .kw_sub),

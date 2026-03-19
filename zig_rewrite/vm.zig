@@ -29,17 +29,26 @@ const builtin_map = std.StaticStringMap(BuiltinTag).initComptime(.{
 
 pub const Vm = struct {
     program: *const lexer.Program,
-    files: std.ArrayList(?FileHandle),
+    func_index: std.StringHashMapUnmanaged(u32),
+    files: std.ArrayListUnmanaged(?FileHandle),
     alloc: std.mem.Allocator,
 
-    pub fn init(program: *const lexer.Program, alloc: std.mem.Allocator) Vm {
-        return .{ .program = program, .files = .empty, .alloc = alloc };
+    pub fn init(program: *const lexer.Program, alloc: std.mem.Allocator) !Vm {
+        var func_index = std.StringHashMapUnmanaged(u32){};
+        try func_index.ensureTotalCapacity(alloc, @intCast(program.functions.items.len));
+        for (program.functions.items, 0..) |*f, i|
+            func_index.putAssumeCapacity(f.name, @intCast(i));
+        return .{
+            .program = program,
+            .func_index = func_index,
+            .files = .empty,
+            .alloc = alloc,
+        };
     }
 
     pub fn findFunc(self: *Vm, name: []const u8) ?*const lexer.Function {
-        for (self.program.functions.items) |*f|
-            if (std.mem.eql(u8, f.name, name)) return f;
-        return null;
+        const idx = self.func_index.get(name) orelse return null;
+        return &self.program.functions.items[idx];
     }
 
     fn allocFile(self: *Vm, handle: FileHandle) !i64 {
@@ -54,49 +63,61 @@ pub const Vm = struct {
     }
 
     fn evalExpr(self: *Vm, expr: *const lexer.Expr, env: []Value) anyerror!Value {
-        return switch (expr.*) {
-            .int => |n| .{ .int = n },
-            .str => |s| .{ .str = s },
-            .reg => |r| env[r],
-            .field => |f| switch (env[f.reg]) {
-                .struct_ => |sv| sv.fields.get(f.field) orelse return error.NoSuchField,
-                else => return error.NotAStruct,
-            },
-            .const_ => |inner| try self.evalExpr(inner, env),
-            .add => |op| .{ .int = (try self.evalExpr(op.a, env)).int +% (try self.evalExpr(op.b, env)).int },
-            .sub => |op| .{ .int = (try self.evalExpr(op.a, env)).int -% (try self.evalExpr(op.b, env)).int },
-            .mul => |op| .{ .int = (try self.evalExpr(op.a, env)).int *% (try self.evalExpr(op.b, env)).int },
-            .div => |op| blk: {
-                const b = (try self.evalExpr(op.b, env)).int;
-                if (b == 0) return error.DivisionByZero;
-                break :blk .{ .int = @divTrunc((try self.evalExpr(op.a, env)).int, b) };
-            },
-            .lt => |op| .{ .bool_ = (try self.evalExpr(op.a, env)).int < (try self.evalExpr(op.b, env)).int },
-            .gt => |op| .{ .bool_ = (try self.evalExpr(op.a, env)).int > (try self.evalExpr(op.b, env)).int },
-            .eq => |op| blk: {
-                const a = try self.evalExpr(op.a, env);
-                const b = try self.evalExpr(op.b, env);
-                break :blk switch (a) {
-                    .int => |x| .{ .bool_ = x == b.int },
-                    .str => |x| .{ .bool_ = std.mem.eql(u8, x, b.str) },
-                    else => return error.TypeMismatch,
-                };
-            },
-            .alloc => |size_expr| blk: {
-                const n: usize = @intCast((try self.evalExpr(size_expr, env)).int);
-                const buf = try self.alloc.alloc(u8, n);
-                @memset(buf, 0);
-                break :blk .{ .ptr = buf };
-            },
-            .struct_lit => |sl| blk: {
-                var fields = std.StringArrayHashMap(Value).init(self.alloc);
-                for (sl.fields.items) |fi|
-                    try fields.put(fi.name, try self.evalExpr(fi.expr, env));
-                break :blk .{ .struct_ = .{ .name = sl.name, .fields = fields } };
-            },
-            .named => |name| if (std.mem.eql(u8, name, "READ")) .{ .int = 0 } else if (std.mem.eql(u8, name, "WRITE")) .{ .int = 1 } else return error.UnknownNamedConstant,
-            .call => |c| try self.callFunc(c.name, c.args.items, env),
-        };
+        var cur = expr;
+        while (true) {
+            switch (cur.*) {
+                .int => |n| return .{ .int = n },
+                .str => |s| return .{ .str = s },
+                .reg => |r| return env[r],
+                .field => |f| return switch (env[f.reg]) {
+                    .struct_ => |sv| sv.fields.get(f.field) orelse return error.NoSuchField,
+                    else => error.NotAStruct,
+                },
+                .const_ => |inner| {
+                    cur = inner;
+                    continue;
+                },
+                .add => |op| return .{ .int = (try self.evalExpr(op.a, env)).int +% (try self.evalExpr(op.b, env)).int },
+                .sub => |op| return .{ .int = (try self.evalExpr(op.a, env)).int -% (try self.evalExpr(op.b, env)).int },
+                .mul => |op| return .{ .int = (try self.evalExpr(op.a, env)).int *% (try self.evalExpr(op.b, env)).int },
+                .div => |op| {
+                    const b = (try self.evalExpr(op.b, env)).int;
+                    if (b == 0) return error.DivisionByZero;
+                    return .{ .int = @divTrunc((try self.evalExpr(op.a, env)).int, b) };
+                },
+                .lt => |op| return .{ .bool_ = (try self.evalExpr(op.a, env)).int < (try self.evalExpr(op.b, env)).int },
+                .gt => |op| return .{ .bool_ = (try self.evalExpr(op.a, env)).int > (try self.evalExpr(op.b, env)).int },
+                .eq => |op| {
+                    const a = try self.evalExpr(op.a, env);
+                    const b = try self.evalExpr(op.b, env);
+                    return switch (a) {
+                        .int => |x| .{ .bool_ = x == b.int },
+                        .str => |x| .{ .bool_ = std.mem.eql(u8, x, b.str) },
+                        else => error.TypeMismatch,
+                    };
+                },
+                .alloc => |size_expr| {
+                    const n: usize = @intCast((try self.evalExpr(size_expr, env)).int);
+                    const buf = try self.alloc.alloc(u8, n);
+                    @memset(buf, 0);
+                    return .{ .ptr = buf };
+                },
+                .struct_lit => |sl| {
+                    var fields = std.StringArrayHashMap(Value).init(self.alloc);
+                    for (sl.fields.items) |fi|
+                        try fields.put(fi.name, try self.evalExpr(fi.expr, env));
+                    return .{ .struct_ = .{ .name = sl.name, .fields = fields } };
+                },
+                .named => |name| {
+                    if (name.len > 0) {
+                        if (name[0] == 'R') return .{ .int = 0 };
+                        if (name[0] == 'W') return .{ .int = 1 };
+                    }
+                    return error.UnknownNamedConstant;
+                },
+                .call => |c| return try self.callFunc(c.name, c.args.items, env),
+            }
+        }
     }
 
     fn printValue(_: *Vm, val: Value) void {
@@ -184,10 +205,17 @@ pub const Vm = struct {
             };
         }
 
-        const func = self.findFunc(name) orelse return error.UndefinedFunction;
-        const new_env = try self.alloc.alloc(Value, func.n_regs);
-
-        @memset(new_env, .void_);
+        const idx = self.func_index.get(name) orelse return error.UndefinedFunction;
+        const func = &self.program.functions.items[idx];
+        var stack_env: [32]Value = undefined;
+        const new_env: []Value = if (func.n_regs <= 32) blk: {
+            @memset(stack_env[0..func.n_regs], .void_);
+            break :blk stack_env[0..func.n_regs];
+        } else blk: {
+            const e = try self.alloc.alloc(Value, func.n_regs);
+            @memset(e, .void_);
+            break :blk e;
+        };
 
         for (func.params.items, 0..) |param, i|
             new_env[param.idx] = args[i];
@@ -196,35 +224,27 @@ pub const Vm = struct {
     }
 
     pub fn execBody(self: *Vm, stmts: []const lexer.Stmt, env: []Value) anyerror!?Value {
-        for (stmts) |*stmt|
-            if (try self.execStmt(stmt, env)) |v| return v;
-        return null;
-    }
-
-    fn execStmt(self: *Vm, stmt: *const lexer.Stmt, env: []Value) anyerror!?Value {
-        switch (stmt.*) {
-            .assign => |a| {
-                env[a.reg] = try self.evalExpr(a.expr, env);
-            },
-            .set_field => |sf| {
-                const val = try self.evalExpr(sf.expr, env);
-                try env[sf.reg].struct_.fields.put(sf.field, val);
-            },
-            .call => |c| {
-                _ = try self.callFunc(c.name, c.args.items, env);
-            },
-            .ret => |e| return try self.evalExpr(e, env),
-            .while_ => |w| {
-                while (true) {
-                    const keep = switch (try self.evalExpr(w.cond, env)) {
-                        .bool_ => |b| b,
-                        .int => |n| n != 0,
-                        else => return error.TypeMismatch,
-                    };
-                    if (!keep) break;
-                    if (try self.execBody(w.body.items, env)) |v| return v;
-                }
-            },
+        for (stmts) |*stmt| {
+            switch (stmt.*) {
+                .assign => |a| env[a.reg] = try self.evalExpr(a.expr, env),
+                .set_field => |sf| {
+                    const val = try self.evalExpr(sf.expr, env);
+                    try env[sf.reg].struct_.fields.put(sf.field, val);
+                },
+                .call => |c| _ = try self.callFunc(c.name, c.args.items, env),
+                .ret => |e| return try self.evalExpr(e, env),
+                .while_ => |w| {
+                    while (true) {
+                        const keep = switch (try self.evalExpr(w.cond, env)) {
+                            .bool_ => |b| b,
+                            .int => |n| n != 0,
+                            else => return error.TypeMismatch,
+                        };
+                        if (!keep) break;
+                        if (try self.execBody(w.body.items, env)) |v| return v;
+                    }
+                },
+            }
         }
         return null;
     }
