@@ -1,13 +1,10 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    // literals
     Int(i64),
     Str(String),
-    // identifiers / keywords
     Ident(String),
-    Reg(String),   // %name
-    Func(String),  // @name
-    // keywords
+    Reg(String),
+    Func(String),
     Const,
     Add,
     Sub,
@@ -22,12 +19,10 @@ pub enum Token {
     Alloc,
     Set,
     Struct,
-    // types
     TyInt,
     TyVoid,
     TyString,
     TyBool,
-    // punctuation
     LBrace,
     RBrace,
     LParen,
@@ -35,7 +30,7 @@ pub enum Token {
     Colon,
     Comma,
     Dot,
-    Assign,   // =
+    Assign,
     Eof,
 }
 
@@ -45,12 +40,10 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, String> {
     let mut i = 0;
 
     while i < chars.len() {
-        // skip whitespace
         if chars[i].is_whitespace() {
             i += 1;
             continue;
         }
-        // line comments
         if chars[i] == ';' {
             while i < chars.len() && chars[i] != '\n' {
                 i += 1;
@@ -58,14 +51,38 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, String> {
             continue;
         }
         match chars[i] {
-            '{' => { tokens.push(Token::LBrace); i += 1; }
-            '}' => { tokens.push(Token::RBrace); i += 1; }
-            '(' => { tokens.push(Token::LParen); i += 1; }
-            ')' => { tokens.push(Token::RParen); i += 1; }
-            ':' => { tokens.push(Token::Colon); i += 1; }
-            ',' => { tokens.push(Token::Comma); i += 1; }
-            '.' => { tokens.push(Token::Dot); i += 1; }
-            '=' => { tokens.push(Token::Assign); i += 1; }
+            '{' => {
+                tokens.push(Token::LBrace);
+                i += 1;
+            }
+            '}' => {
+                tokens.push(Token::RBrace);
+                i += 1;
+            }
+            '(' => {
+                tokens.push(Token::LParen);
+                i += 1;
+            }
+            ')' => {
+                tokens.push(Token::RParen);
+                i += 1;
+            }
+            ':' => {
+                tokens.push(Token::Colon);
+                i += 1;
+            }
+            ',' => {
+                tokens.push(Token::Comma);
+                i += 1;
+            }
+            '.' => {
+                tokens.push(Token::Dot);
+                i += 1;
+            }
+            '=' => {
+                tokens.push(Token::Assign);
+                i += 1;
+            }
             '"' => {
                 i += 1;
                 let mut s = String::new();
@@ -77,7 +94,10 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, String> {
                             't' => s.push('\t'),
                             '"' => s.push('"'),
                             '\\' => s.push('\\'),
-                            c => { s.push('\\'); s.push(c); }
+                            c => {
+                                s.push('\\');
+                                s.push(c);
+                            }
                         }
                     } else {
                         s.push(chars[i]);
@@ -87,7 +107,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, String> {
                 if i >= chars.len() {
                     return Err("Unterminated string literal".into());
                 }
-                i += 1; // closing "
+                i += 1;
                 tokens.push(Token::Str(s));
             }
             '%' => {
@@ -100,9 +120,13 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, String> {
                 let name = read_ident(&chars, &mut i);
                 tokens.push(Token::Func(name));
             }
-            c if c.is_ascii_digit() || (c == '-' && i + 1 < chars.len() && chars[i+1].is_ascii_digit()) => {
+            c if c.is_ascii_digit()
+                || (c == '-' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit()) =>
+            {
                 let neg = c == '-';
-                if neg { i += 1; }
+                if neg {
+                    i += 1;
+                }
                 let mut num = String::new();
                 while i < chars.len() && chars[i].is_ascii_digit() {
                     num.push(chars[i]);
@@ -114,25 +138,25 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, String> {
             c if c.is_alphabetic() || c == '_' => {
                 let word = read_ident(&chars, &mut i);
                 let tok = match word.as_str() {
-                    "const"  => Token::Const,
-                    "add"    => Token::Add,
-                    "sub"    => Token::Sub,
-                    "mul"    => Token::Mul,
-                    "div"    => Token::Div,
-                    "lt"     => Token::Lt,
-                    "gt"     => Token::Gt,
-                    "eq"     => Token::Eq,
-                    "ret"    => Token::Ret,
-                    "call"   => Token::Call,
-                    "while"  => Token::While,
-                    "alloc"  => Token::Alloc,
-                    "set"    => Token::Set,
+                    "const" => Token::Const,
+                    "add" => Token::Add,
+                    "sub" => Token::Sub,
+                    "mul" => Token::Mul,
+                    "div" => Token::Div,
+                    "lt" => Token::Lt,
+                    "gt" => Token::Gt,
+                    "eq" => Token::Eq,
+                    "ret" => Token::Ret,
+                    "call" => Token::Call,
+                    "while" => Token::While,
+                    "alloc" => Token::Alloc,
+                    "set" => Token::Set,
                     "struct" => Token::Struct,
-                    "int"    => Token::TyInt,
-                    "void"   => Token::TyVoid,
+                    "int" => Token::TyInt,
+                    "void" => Token::TyVoid,
                     "string" => Token::TyString,
-                    "bool"   => Token::TyBool,
-                    _        => Token::Ident(word),
+                    "bool" => Token::TyBool,
+                    _ => Token::Ident(word),
                 };
                 tokens.push(tok);
             }
