@@ -25,6 +25,12 @@ pub fn main() !void {
     const is_llvm = std.mem.eql(u8, first, "llvm");
     const is_ast = std.mem.eql(u8, first, "--ast");
     const is_jit = std.mem.eql(u8, first, "--jit");
+    const is_version = std.mem.eql(u8, first, "version");
+
+    if (is_version) {
+        std.debug.print("v0.0.1 - By Navid Momtahen (GPL-3.0)", .{});
+        return;
+    }
 
     if (is_jit) {
         if (argv.len < 3) {
