@@ -230,7 +230,6 @@ const Ty = enum { int, void_, str, bool_, named };
 const StructDef = struct { name: []const u8, fields: List(StructField) };
 const StructField = struct { name: []const u8, ty: Ty };
 const RegIdx = u16;
-
 const Function = struct {
     name: []const u8,
     params: List(Param),
