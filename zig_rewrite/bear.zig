@@ -2,7 +2,6 @@
 
 const std = @import("std");
 const bear_lexer = @import("lexer.zig");
-const bear_io = @import("io.zig");
 const bear_parser = @import("parser.zig");
 const bear_vm = @import("vm.zig");
 const bear_qbe = @import("qbe_emitter.zig");
