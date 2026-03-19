@@ -1,0 +1,4 @@
+.zig-cache
+zig-out
+*.pdb
+.DS_Store
