@@ -17,7 +17,7 @@ const ParseError = error{
 
 /// Per-function register name -> index map built during parsing.
 const RegMap = struct {
-    names: std.ArrayList([]const u8),
+    names: std.ArrayListUnmanaged([]const u8),
     alloc: std.mem.Allocator,
 
     fn init(alloc: std.mem.Allocator) RegMap {
@@ -315,6 +315,7 @@ const Parser = struct {
 
 pub fn parse(tokens: []const lexer.Token, token_list: std.ArrayList(lexer.Token), alloc: std.mem.Allocator) !lexer.Program {
     var slab = try lexer.ExprSlab.init(alloc, tokens.len / 3 + 64);
+    errdefer slab.deinit(alloc);
     var p = Parser{ .tokens = tokens, .pos = 0, .alloc = alloc, .slab = &slab };
     var prog = try p.parseProgram();
     prog.slab = slab;

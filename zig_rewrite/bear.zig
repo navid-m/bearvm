@@ -64,8 +64,10 @@ fn testParse(src: []const u8, alloc: std.mem.Allocator) !lexer.Program {
 
 fn evalMain(src: []const u8, alloc: std.mem.Allocator) !bear_vm.Value {
     const list = try lexer.tokenize(src, alloc);
-    errdefer lexer.freeTokens(list, alloc);
-    var prog = try bear_parser.parse(list.items, list, alloc);
+    var prog = bear_parser.parse(list.items, list, alloc) catch |err| {
+        lexer.freeTokens(list, alloc);
+        return err;
+    };
     defer prog.deinit(alloc);
     var vm = try bear_vm.Vm.init(&prog, alloc);
     defer vm.deinit();

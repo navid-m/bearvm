@@ -164,6 +164,7 @@ pub fn tokenize(src: []const u8, alloc: std.mem.Allocator) !std.ArrayList(Token)
             '"' => {
                 i += 1;
                 var s: std.ArrayList(u8) = .empty;
+                errdefer s.deinit(alloc);
                 while (i < src.len and src[i] != '"') {
                     if (src[i] == '\\' and i + 1 < src.len) {
                         i += 1;
@@ -223,7 +224,7 @@ pub fn tokenize(src: []const u8, alloc: std.mem.Allocator) !std.ArrayList(Token)
 pub const Ty = enum { int, void_, str, bool_, named };
 pub const StructDef = struct {
     name: []const u8,
-    fields: std.ArrayList(StructField),
+    fields: std.ArrayListUnmanaged(StructField),
 
     pub fn deinit(self: *StructDef, alloc: std.mem.Allocator) void {
         self.fields.deinit(alloc);
@@ -233,9 +234,9 @@ pub const StructField = struct { name: []const u8, ty: Ty };
 pub const RegIdx = u16;
 pub const Function = struct {
     name: []const u8,
-    params: std.ArrayList(Param),
+    params: std.ArrayListUnmanaged(Param),
     ret_ty: Ty,
-    body: std.ArrayList(Stmt),
+    body: std.ArrayListUnmanaged(Stmt),
     n_regs: u16,
 
     pub fn deinit(self: *Function, alloc: std.mem.Allocator) void {
@@ -247,8 +248,8 @@ pub const Function = struct {
 
 pub const Param = struct { name: []const u8, ty: Ty, idx: RegIdx };
 pub const Program = struct {
-    structs: std.ArrayList(StructDef),
-    functions: std.ArrayList(Function),
+    structs: std.ArrayListUnmanaged(StructDef),
+    functions: std.ArrayListUnmanaged(Function),
     slab: ExprSlab,
     tokens: std.ArrayList(Token),
 
@@ -264,9 +265,9 @@ pub const Program = struct {
 pub const Stmt = union(enum) {
     assign: struct { reg: RegIdx, expr: *Expr },
     set_field: struct { reg: RegIdx, field: []const u8, expr: *Expr },
-    call: struct { name: []const u8, args: std.ArrayList(*Expr) },
+    call: struct { name: []const u8, args: std.ArrayListUnmanaged(*Expr) },
     ret: *Expr,
-    while_: struct { cond: *Expr, body: std.ArrayList(Stmt) },
+    while_: struct { cond: *Expr, body: std.ArrayListUnmanaged(Stmt) },
 
     pub fn deinit(self: *Stmt, alloc: std.mem.Allocator) void {
         switch (self.*) {
@@ -295,9 +296,9 @@ pub const Expr = union(enum) {
     lt: BinOp,
     gt: BinOp,
     eq: BinOp,
-    call: struct { name: []const u8, args: std.ArrayList(*Expr) },
+    call: struct { name: []const u8, args: std.ArrayListUnmanaged(*Expr) },
     alloc: *Expr,
-    struct_lit: struct { name: []const u8, fields: std.ArrayList(FieldInit) },
+    struct_lit: struct { name: []const u8, fields: std.ArrayListUnmanaged(FieldInit) },
     named: []const u8,
 };
 
@@ -310,6 +311,13 @@ pub const ExprSlab = struct {
     }
 
     pub fn deinit(self: *ExprSlab, alloc: std.mem.Allocator) void {
+        for (self.buf[0..self.used]) |*e| {
+            switch (e.*) {
+                .struct_lit => |*sl| sl.fields.deinit(alloc),
+                .call => |*c| c.args.deinit(alloc),
+                else => {},
+            }
+        }
         alloc.free(self.buf);
     }
 
