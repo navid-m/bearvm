@@ -442,7 +442,6 @@ const Emitter = struct {
             \\declare i64 @write(i64, ptr, i64)
             \\declare i64 @close(i64)
             \\
-            \\
         );
     }
 
