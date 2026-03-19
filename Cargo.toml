@@ -1,5 +1,6 @@
 [package]
 name = "bear"
+description = "VM for QBE/SSA and interpreted modes of execution"
 version = "0.1.0"
 edition = "2024"
 
