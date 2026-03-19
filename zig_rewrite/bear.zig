@@ -2,28 +2,13 @@
 
 const std = @import("std");
 const lexer = @import("lexer.zig");
-
+const bear_io = @import("bear_io.zig");
 const List = std.ArrayList;
+
 pub const Allocator = std.mem.Allocator;
 
-var stdout_buf: [65536]u8 = undefined;
-var stdout_pos: usize = 0;
-
-fn flushStdout() void {
-    if (stdout_pos == 0) return;
-    _ = std.fs.File.stdout().writeAll(stdout_buf[0..stdout_pos]) catch {};
-    stdout_pos = 0;
-}
-
-fn writeStdout(s: []const u8) void {
-    if (stdout_pos + s.len > stdout_buf.len) flushStdout();
-    if (s.len > stdout_buf.len) {
-        _ = std.fs.File.stdout().writeAll(s) catch {};
-        return;
-    }
-    @memcpy(stdout_buf[stdout_pos..][0..s.len], s);
-    stdout_pos += s.len;
-}
+pub var stdout_buf: [65536]u8 = undefined;
+pub var stdout_pos: usize = 0;
 
 const ParseError = error{
     UnexpectedToken,
@@ -438,18 +423,18 @@ const Vm = struct {
     fn printValue(_: *Vm, val: Value) void {
         var tmp: [64]u8 = undefined;
         switch (val) {
-            .int => |n| writeStdout(std.fmt.bufPrint(&tmp, "{d}\n", .{n}) catch return),
+            .int => |n| bear_io.writeStdout(std.fmt.bufPrint(&tmp, "{d}\n", .{n}) catch return),
             .str => |s| {
-                writeStdout(s);
-                writeStdout("\n");
+                bear_io.writeStdout(s);
+                bear_io.writeStdout("\n");
             },
-            .bool_ => |b| writeStdout(if (b) "true\n" else "false\n"),
-            .ptr => writeStdout("<ptr>\n"),
-            .file => |fd| writeStdout(std.fmt.bufPrint(&tmp, "<fd:{d}>\n", .{fd}) catch return),
+            .bool_ => |b| bear_io.writeStdout(if (b) "true\n" else "false\n"),
+            .ptr => bear_io.writeStdout("<ptr>\n"),
+            .file => |fd| bear_io.writeStdout(std.fmt.bufPrint(&tmp, "<fd:{d}>\n", .{fd}) catch return),
             .void_ => {},
             .struct_ => |sv| {
-                writeStdout(sv.name);
-                writeStdout(" { ... }\n");
+                bear_io.writeStdout(sv.name);
+                bear_io.writeStdout(" { ... }\n");
             },
         }
     }
@@ -466,7 +451,7 @@ const Vm = struct {
             return switch (tag) {
                 .puts => blk: {
                     for (args) |a| self.printValue(a);
-                    flushStdout();
+                    bear_io.flushStdout();
                     break :blk .void_;
                 },
                 .open => blk: {
