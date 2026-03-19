@@ -358,3 +358,212 @@ pub fn run(program: &Program) -> Result<(), String> {
     vm.exec_body(&main.body, &mut env)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{lexer::tokenize, parser::parse};
+
+    fn run_src(src: &str) -> Result<(), String> {
+        let tokens = tokenize(src).unwrap();
+        let program = parse(tokens).unwrap();
+        run(&program)
+    }
+
+    /// Run and capture the return value of @main
+    fn eval_main(src: &str) -> Value {
+        let tokens = tokenize(src).unwrap();
+        let program = parse(tokens).unwrap();
+        let mut vm = Vm::new(&program);
+        let main = vm.find_func("main").unwrap().clone();
+        let mut env = HashMap::new();
+        vm.exec_body(&main.body, &mut env)
+            .unwrap()
+            .unwrap_or(Value::Void)
+    }
+
+    #[test]
+    fn ret_integer() {
+        let v = eval_main("@main(): int { ret 42 }");
+        assert!(matches!(v, Value::Int(42)));
+    }
+
+    #[test]
+    fn const_and_ret() {
+        let v = eval_main("@main(): int { %x = const 7 ret %x }");
+        assert!(matches!(v, Value::Int(7)));
+    }
+
+    #[test]
+    fn arithmetic_add() {
+        let v = eval_main("@main(): int { %r = add 3, 4 ret %r }");
+        assert!(matches!(v, Value::Int(7)));
+    }
+
+    #[test]
+    fn arithmetic_sub() {
+        let v = eval_main("@main(): int { %r = sub 10, 3 ret %r }");
+        assert!(matches!(v, Value::Int(7)));
+    }
+
+    #[test]
+    fn arithmetic_mul() {
+        let v = eval_main("@main(): int { %r = mul 3, 4 ret %r }");
+        assert!(matches!(v, Value::Int(12)));
+    }
+
+    #[test]
+    fn arithmetic_div() {
+        let v = eval_main("@main(): int { %r = div 12, 4 ret %r }");
+        assert!(matches!(v, Value::Int(3)));
+    }
+
+    #[test]
+    fn div_by_zero_is_error() {
+        let tokens = tokenize("@main(): int { %r = div 1, 0 ret %r }").unwrap();
+        let program = parse(tokens).unwrap();
+        let mut vm = Vm::new(&program);
+        let main = vm.find_func("main").unwrap().clone();
+        let mut env = HashMap::new();
+        assert!(vm.exec_body(&main.body, &mut env).is_err());
+    }
+
+    #[test]
+    fn comparison_lt_true() {
+        let v = eval_main("@main(): int { %r = lt 3, 5 ret %r }");
+        assert!(matches!(v, Value::Bool(true)));
+    }
+
+    #[test]
+    fn comparison_lt_false() {
+        let v = eval_main("@main(): int { %r = lt 5, 3 ret %r }");
+        assert!(matches!(v, Value::Bool(false)));
+    }
+
+    #[test]
+    fn comparison_gt() {
+        let v = eval_main("@main(): int { %r = gt 5, 3 ret %r }");
+        assert!(matches!(v, Value::Bool(true)));
+    }
+
+    #[test]
+    fn comparison_eq_ints() {
+        let v = eval_main("@main(): int { %r = eq 4, 4 ret %r }");
+        assert!(matches!(v, Value::Bool(true)));
+    }
+
+    #[test]
+    fn while_loop_counts() {
+        let v =
+            eval_main("@main(): int { %i = const 0 while (lt %i, 5) { %i = add %i, 1 } ret %i }");
+        assert!(matches!(v, Value::Int(5)));
+    }
+
+    #[test]
+    fn call_user_function() {
+        let src = r#"
+@double(%x: int): int { ret mul %x, 2 }
+@main(): int { %r = call double(21) ret %r }
+"#;
+        let v = eval_main(src);
+        assert!(matches!(v, Value::Int(42)));
+    }
+
+    #[test]
+    fn struct_field_access() {
+        let src = r#"
+struct Point { x: int y: int }
+@main(): int {
+    %p = Point { x: 10 y: 20 }
+    %v = %p.x
+    ret %v
+}
+"#;
+        let v = eval_main(src);
+        assert!(matches!(v, Value::Int(10)));
+    }
+
+    #[test]
+    fn struct_set_field() {
+        let src = r#"
+struct Point { x: int y: int }
+@main(): int {
+    %p = Point { x: 1 y: 2 }
+    set %p.x = const 99
+    %v = %p.x
+    ret %v
+}
+"#;
+        let v = eval_main(src);
+        assert!(matches!(v, Value::Int(99)));
+    }
+
+    #[test]
+    fn named_constant_read() {
+        let v = eval_main("@main(): int { %m = READ ret %m }");
+        assert!(matches!(v, Value::Int(0)));
+    }
+
+    #[test]
+    fn named_constant_write() {
+        let v = eval_main("@main(): int { %m = WRITE ret %m }");
+        assert!(matches!(v, Value::Int(1)));
+    }
+
+    #[test]
+    fn alloc_returns_ptr() {
+        let v = eval_main("@main(): int { %buf = alloc 64 ret 0 }");
+        assert!(matches!(v, Value::Int(0)));
+    }
+
+    #[test]
+    fn no_main_is_error() {
+        let tokens = tokenize("@other: void { ret 0 }").unwrap();
+        let program = parse(tokens).unwrap();
+        assert!(run(&program).is_err());
+    }
+
+    #[test]
+    fn undefined_register_is_error() {
+        let tokens = tokenize("@main(): int { ret %nope }").unwrap();
+        let program = parse(tokens).unwrap();
+        let mut vm = Vm::new(&program);
+        let main = vm.find_func("main").unwrap().clone();
+        let mut env = HashMap::new();
+        assert!(vm.exec_body(&main.body, &mut env).is_err());
+    }
+
+    #[test]
+    fn simple_bear_runs() {
+        let src = r#"
+@other_func: void {
+    call puts("here i go, doing some thing")
+}
+@main(): int {
+    %0 = const 10
+    call puts(%0)
+    %1 = const "Hello, world."
+    call puts(%1)
+    call puts("Hi there.")
+    call other_func
+    ret 0
+}
+"#;
+        assert!(run_src(src).is_ok());
+    }
+
+    #[test]
+    fn loop_bear_runs() {
+        let src = r#"
+@main(): int {
+    %i = const 0
+    while (lt %i, 10) {
+        call puts("looping")
+        %i = add %i, 1
+    }
+    ret 0
+}
+"#;
+        assert!(run_src(src).is_ok());
+    }
+}

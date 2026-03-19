@@ -314,3 +314,179 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, String> {
     let mut p = Parser { tokens, pos: 0 };
     p.parse_program()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::tokenize;
+
+    fn parse_src(src: &str) -> Program {
+        let tokens = tokenize(src).expect("lex failed");
+        parse(tokens).expect("parse failed")
+    }
+
+    #[test]
+    fn minimal_void_function_no_parens() {
+        let p = parse_src("@other_func: void { ret 0 }");
+        assert_eq!(p.functions.len(), 1);
+        assert_eq!(p.functions[0].name, "other_func");
+        assert_eq!(p.functions[0].ret_ty, Ty::Void);
+        assert!(p.functions[0].params.is_empty());
+    }
+
+    #[test]
+    fn function_with_empty_parens_and_return_type() {
+        let p = parse_src("@main(): int { ret 0 }");
+        assert_eq!(p.functions[0].ret_ty, Ty::Int);
+    }
+
+    #[test]
+    fn call_without_parens() {
+        let p = parse_src("@main(): int { call other_func ret 0 }");
+        let body = &p.functions[0].body;
+        assert!(
+            matches!(&body[0], Stmt::Call(name, args) if name == "other_func" && args.is_empty())
+        );
+    }
+
+    #[test]
+    fn call_with_args() {
+        let p = parse_src(r#"@main(): int { call puts("hi") ret 0 }"#);
+        let body = &p.functions[0].body;
+        assert!(matches!(&body[0], Stmt::Call(name, args) if name == "puts" && args.len() == 1));
+    }
+
+    #[test]
+    fn assign_const_int() {
+        let p = parse_src("@main(): int { %x = const 42 ret 0 }");
+        assert!(matches!(&p.functions[0].body[0], Stmt::Assign(r, _) if r == "x"));
+    }
+
+    #[test]
+    fn assign_add() {
+        let p = parse_src("@main(): int { %r = add %a, %b ret 0 }");
+        assert!(matches!(&p.functions[0].body[0], Stmt::Assign(r, Expr::Add(..)) if r == "r"));
+    }
+
+    #[test]
+    fn while_loop() {
+        let p = parse_src("@main(): int { while (lt %i, 10) { call puts(\"x\") } ret 0 }");
+        assert!(matches!(&p.functions[0].body[0], Stmt::While(..)));
+    }
+
+    #[test]
+    fn set_field() {
+        let p = parse_src("@main(): int { set %p.age = const 1 ret 0 }");
+        assert!(
+            matches!(&p.functions[0].body[0], Stmt::SetField(r, f, _) if r == "p" && f == "age")
+        );
+    }
+
+    #[test]
+    fn field_access_expr() {
+        let p = parse_src("@main(): int { %v = %p.name ret 0 }");
+        assert!(
+            matches!(&p.functions[0].body[0], Stmt::Assign(_, Expr::Field(r, f)) if r == "p" && f == "name")
+        );
+    }
+
+    #[test]
+    fn alloc_expr() {
+        let p = parse_src("@main(): int { %buf = alloc 1024 ret 0 }");
+        assert!(matches!(
+            &p.functions[0].body[0],
+            Stmt::Assign(_, Expr::Alloc(_))
+        ));
+    }
+
+    #[test]
+    fn named_constant_read() {
+        let p = parse_src("@main(): int { %m = READ ret 0 }");
+        assert!(matches!(&p.functions[0].body[0], Stmt::Assign(_, Expr::Named(n)) if n == "READ"));
+    }
+
+    #[test]
+    fn struct_definition() {
+        let p = parse_src("struct Person { name: string age: int }");
+        assert_eq!(p.structs.len(), 1);
+        assert_eq!(p.structs[0].name, "Person");
+        assert_eq!(p.structs[0].fields.len(), 2);
+        assert_eq!(p.structs[0].fields[0], ("name".into(), Ty::Str));
+        assert_eq!(p.structs[0].fields[1], ("age".into(), Ty::Int));
+    }
+
+    #[test]
+    fn struct_literal_in_assign() {
+        let p = parse_src(r#"@main(): int { %p = Person { name: "Alice" age: 25 } ret 0 }"#);
+        assert!(matches!(
+            &p.functions[0].body[0],
+            Stmt::Assign(_, Expr::StructLit(..))
+        ));
+    }
+
+    #[test]
+    fn parses_simple_bear() {
+        let src = r#"
+@other_func: void {
+    call puts("here i go, doing some thing")
+}
+@main(): int {
+    %0 = const 10
+    call puts(%0)
+    %1 = const "Hello, world."
+    call puts(%1)
+    call puts("Hi there.")
+    call other_func
+    ret 0
+}
+"#;
+        let p = parse_src(src);
+        assert_eq!(p.functions.len(), 2);
+        assert_eq!(p.functions[0].name, "other_func");
+        assert_eq!(p.functions[1].name, "main");
+        assert_eq!(p.functions[1].body.len(), 7);
+    }
+
+    #[test]
+    fn parses_loop_bear() {
+        let src = r#"
+@main(): int {
+    %i = const 0
+    while (lt %i, 10) {
+        call puts("looping")
+        %i = add %i, 1
+    }
+    ret 0
+}
+"#;
+        let p = parse_src(src);
+        assert_eq!(p.functions[0].body.len(), 3);
+        assert!(matches!(&p.functions[0].body[1], Stmt::While(..)));
+    }
+
+    #[test]
+    fn parses_structs_bear() {
+        let src = r#"
+struct Person {
+    name: string
+    age: int
+}
+@main(): int {
+    %p = Person { name: "Alice" age: 25 }
+    call puts(%p.name)
+    set %p.age = add %p.age, 1
+    call puts(%p.age)
+    ret 0
+}
+"#;
+        let p = parse_src(src);
+        assert_eq!(p.structs.len(), 1);
+        assert_eq!(p.functions.len(), 1);
+    }
+
+    #[test]
+    fn unknown_top_level_token_is_error() {
+        let tokens = tokenize("42").unwrap();
+        assert!(parse(tokens).is_err());
+    }
+}

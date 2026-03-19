@@ -390,3 +390,186 @@ pub fn emit(program: &Program) -> Result<String, String> {
     let mut emitter = Emitter::new();
     emitter.emit_program(program)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{lexer::tokenize, parser::parse};
+
+    fn emit_src(src: &str) -> String {
+        let tokens = tokenize(src).unwrap();
+        let program = parse(tokens).unwrap();
+        emit(&program).unwrap()
+    }
+
+    fn has(ir: &str, needle: &str) -> bool {
+        ir.contains(needle)
+    }
+
+    #[test]
+    fn emits_export_function() {
+        let ir = emit_src("@main(): int { ret 0 }");
+        assert!(has(&ir, "export function w $main()"));
+    }
+
+    #[test]
+    fn emits_start_label() {
+        let ir = emit_src("@main(): int { ret 0 }");
+        assert!(has(&ir, "@start"));
+    }
+
+    #[test]
+    fn void_function_no_return_type_prefix() {
+        let ir = emit_src("@foo: void { ret 0 }");
+        assert!(has(&ir, "export function $foo()"));
+    }
+
+    #[test]
+    fn ret_zero() {
+        let ir = emit_src("@main(): int { ret 0 }");
+        assert!(has(&ir, "ret"));
+    }
+
+    #[test]
+    fn string_literal_goes_to_data_section() {
+        let ir = emit_src(r#"@main(): int { call puts("hello") ret 0 }"#);
+        assert!(has(&ir, "data $str0"));
+        assert!(has(&ir, "\"hello\""));
+    }
+
+    #[test]
+    fn duplicate_strings_interned_once() {
+        let ir = emit_src(r#"@main(): int { call puts("hi") call puts("hi") ret 0 }"#);
+        assert_eq!(ir.matches("data $str").count(), 1);
+    }
+
+    #[test]
+    fn add_emits_add_instruction() {
+        let ir = emit_src("@main(): int { %r = add 1, 2 ret 0 }");
+        assert!(has(&ir, "=w add"));
+    }
+
+    #[test]
+    fn sub_emits_sub_instruction() {
+        let ir = emit_src("@main(): int { %r = sub 5, 3 ret 0 }");
+        assert!(has(&ir, "=w sub"));
+    }
+
+    #[test]
+    fn mul_emits_mul_instruction() {
+        let ir = emit_src("@main(): int { %r = mul 2, 3 ret 0 }");
+        assert!(has(&ir, "=w mul"));
+    }
+
+    #[test]
+    fn div_emits_div_instruction() {
+        let ir = emit_src("@main(): int { %r = div 6, 2 ret 0 }");
+        assert!(has(&ir, "=w div"));
+    }
+
+    #[test]
+    fn lt_emits_csltw() {
+        let ir = emit_src("@main(): int { %r = lt 1, 2 ret 0 }");
+        assert!(has(&ir, "csltw"));
+    }
+
+    #[test]
+    fn gt_emits_csgtw() {
+        let ir = emit_src("@main(): int { %r = gt 2, 1 ret 0 }");
+        assert!(has(&ir, "csgtw"));
+    }
+
+    #[test]
+    fn eq_emits_ceqw() {
+        let ir = emit_src("@main(): int { %r = eq 1, 1 ret 0 }");
+        assert!(has(&ir, "ceqw"));
+    }
+
+    #[test]
+    fn while_emits_loop_labels_and_jnz() {
+        let ir = emit_src("@main(): int { while (lt %i, 10) { call puts(\"x\") } ret 0 }");
+        assert!(has(&ir, "@loop0"));
+        assert!(has(&ir, "@lbody0"));
+        assert!(has(&ir, "@lend0"));
+        assert!(has(&ir, "jnz"));
+        assert!(has(&ir, "jmp @loop0"));
+    }
+
+    #[test]
+    fn call_puts_emits_call_puts() {
+        let ir = emit_src(r#"@main(): int { call puts("hi") ret 0 }"#);
+        assert!(has(&ir, "call $puts("));
+    }
+
+    #[test]
+    fn call_without_args_emits_call() {
+        let ir = emit_src("@foo: void { ret 0 } @main(): int { call foo ret 0 }");
+        assert!(has(&ir, "call $foo()"));
+    }
+
+    #[test]
+    fn named_read_emits_zero() {
+        let ir = emit_src("@main(): int { %m = READ ret 0 }");
+        assert!(has(&ir, "copy 0"));
+    }
+
+    #[test]
+    fn named_write_emits_one() {
+        let ir = emit_src("@main(): int { %m = WRITE ret 0 }");
+        assert!(has(&ir, "copy 1"));
+    }
+
+    #[test]
+    fn alloc_emits_alloc8() {
+        let ir = emit_src("@main(): int { %buf = alloc 1024 ret 0 }");
+        assert!(has(&ir, "alloc8"));
+    }
+
+    #[test]
+    fn simple_bear_emits_valid_ir() {
+        let src = r#"
+@other_func: void {
+    call puts("here i go, doing some thing")
+}
+@main(): int {
+    %0 = const 10
+    call puts(%0)
+    %1 = const "Hello, world."
+    call puts(%1)
+    call puts("Hi there.")
+    call other_func
+    ret 0
+}
+"#;
+        let ir = emit_src(src);
+        assert!(has(&ir, "export function $other_func()"));
+        assert!(has(&ir, "export function w $main()"));
+        assert!(has(&ir, "call $puts("));
+        assert!(has(&ir, "call $other_func()"));
+    }
+
+    #[test]
+    fn loop_bear_emits_valid_ir() {
+        let src = r#"
+@main(): int {
+    %i = const 0
+    while (lt %i, 10) {
+        call puts("looping")
+        %i = add %i, 1
+    }
+    ret 0
+}
+"#;
+        let ir = emit_src(src);
+        assert!(has(&ir, "@loop0"));
+        assert!(has(&ir, "jnz"));
+        assert!(has(&ir, "data $str0"));
+    }
+
+    #[test]
+    fn unknown_named_constant_is_error() {
+        let tokens = tokenize("@main(): int { %x = BOGUS ret 0 }").unwrap();
+        let program = parse(tokens).unwrap();
+        assert!(emit(&program).is_err());
+    }
+}

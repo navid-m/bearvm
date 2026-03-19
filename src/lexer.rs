@@ -176,3 +176,119 @@ fn read_ident(chars: &[char], i: &mut usize) -> String {
     }
     s
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lex(src: &str) -> Vec<Token> {
+        tokenize(src).expect("lex failed")
+    }
+
+    #[test]
+    fn empty_input() {
+        assert_eq!(lex(""), vec![Token::Eof]);
+    }
+
+    #[test]
+    fn keywords() {
+        let toks = lex("const add sub mul div lt gt eq ret call while alloc set struct");
+        assert_eq!(toks[0],  Token::Const);
+        assert_eq!(toks[1],  Token::Add);
+        assert_eq!(toks[2],  Token::Sub);
+        assert_eq!(toks[3],  Token::Mul);
+        assert_eq!(toks[4],  Token::Div);
+        assert_eq!(toks[5],  Token::Lt);
+        assert_eq!(toks[6],  Token::Gt);
+        assert_eq!(toks[7],  Token::Eq);
+        assert_eq!(toks[8],  Token::Ret);
+        assert_eq!(toks[9],  Token::Call);
+        assert_eq!(toks[10], Token::While);
+        assert_eq!(toks[11], Token::Alloc);
+        assert_eq!(toks[12], Token::Set);
+        assert_eq!(toks[13], Token::Struct);
+    }
+
+    #[test]
+    fn type_keywords() {
+        let toks = lex("int void string bool");
+        assert_eq!(toks[0], Token::TyInt);
+        assert_eq!(toks[1], Token::TyVoid);
+        assert_eq!(toks[2], Token::TyString);
+        assert_eq!(toks[3], Token::TyBool);
+    }
+
+    #[test]
+    fn punctuation() {
+        let toks = lex("{ } ( ) : , . =");
+        assert_eq!(toks[0], Token::LBrace);
+        assert_eq!(toks[1], Token::RBrace);
+        assert_eq!(toks[2], Token::LParen);
+        assert_eq!(toks[3], Token::RParen);
+        assert_eq!(toks[4], Token::Colon);
+        assert_eq!(toks[5], Token::Comma);
+        assert_eq!(toks[6], Token::Dot);
+        assert_eq!(toks[7], Token::Assign);
+    }
+
+    #[test]
+    fn integer_literals() {
+        let toks = lex("0 42 -7");
+        assert_eq!(toks[0], Token::Int(0));
+        assert_eq!(toks[1], Token::Int(42));
+        assert_eq!(toks[2], Token::Int(-7));
+    }
+
+    #[test]
+    fn string_literal() {
+        let toks = lex(r#""hello world""#);
+        assert_eq!(toks[0], Token::Str("hello world".into()));
+    }
+
+    #[test]
+    fn string_escape_sequences() {
+        let toks = lex(r#""line1\nline2""#);
+        assert_eq!(toks[0], Token::Str("line1\nline2".into()));
+    }
+
+    #[test]
+    fn register_and_func_sigils() {
+        let toks = lex("%my_reg @my_func");
+        assert_eq!(toks[0], Token::Reg("my_reg".into()));
+        assert_eq!(toks[1], Token::Func("my_func".into()));
+    }
+
+    #[test]
+    fn identifier() {
+        let toks = lex("puts other_func");
+        assert_eq!(toks[0], Token::Ident("puts".into()));
+        assert_eq!(toks[1], Token::Ident("other_func".into()));
+    }
+
+    #[test]
+    fn line_comment_skipped() {
+        let toks = lex("; this is a comment\n42");
+        assert_eq!(toks[0], Token::Int(42));
+    }
+
+    #[test]
+    fn unterminated_string_is_error() {
+        assert!(tokenize(r#""oops"#).is_err());
+    }
+
+    #[test]
+    fn unexpected_char_is_error() {
+        assert!(tokenize("^").is_err());
+    }
+
+    #[test]
+    fn full_function_header() {
+        let toks = lex("@main(): int {");
+        assert_eq!(toks[0], Token::Func("main".into()));
+        assert_eq!(toks[1], Token::LParen);
+        assert_eq!(toks[2], Token::RParen);
+        assert_eq!(toks[3], Token::Colon);
+        assert_eq!(toks[4], Token::TyInt);
+        assert_eq!(toks[5], Token::LBrace);
+    }
+}
