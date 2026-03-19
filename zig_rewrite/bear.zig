@@ -7,6 +7,7 @@ const bear_parser = @import("parser.zig");
 const bear_vm = @import("vm.zig");
 const bear_qbe = @import("qbe_emitter.zig");
 const bear_llvm = @import("llvm_emitter.zig");
+const bear_ast = @import("ast_printer.zig");
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -22,6 +23,22 @@ pub fn main() !void {
     const first = argv[1];
     const is_qbe = std.mem.eql(u8, first, "qbe");
     const is_llvm = std.mem.eql(u8, first, "llvm");
+    const is_ast = std.mem.eql(u8, first, "--ast");
+
+    if (is_ast) {
+        if (argv.len < 3) {
+            printUsage();
+            std.process.exit(1);
+        }
+        const path = argv[2];
+        var program = loadProgram(path, alloc);
+        defer program.deinit(alloc);
+        bear_ast.printAst(&program, alloc) catch |e| {
+            std.debug.print("AST print error: {}\n", .{e});
+            std.process.exit(1);
+        };
+        return;
+    }
 
     if (is_qbe or is_llvm) {
         if (argv.len < 3) {
@@ -40,7 +57,6 @@ pub fn main() !void {
         return;
     }
 
-    // default: interpret
     const src = std.fs.cwd().readFileAlloc(alloc, first, 10 * 1024 * 1024) catch |e| {
         std.debug.print("Error reading {s}: {}\n", .{ first, e });
         std.process.exit(1);
@@ -66,6 +82,7 @@ fn printUsage() void {
     std.debug.print(
         \\Usage:
         \\  bear <file.bear>              Run via interpreter
+        \\  bear --ast <file.bear>        Print AST as unicode tree
         \\  bear qbe <file.bear>          Emit QBE IR
         \\  bear qbe <file.bear> -c       Compile with QBE + cc
         \\  bear llvm <file.bear>         Emit LLVM IR
