@@ -1,7 +1,7 @@
 //! Bear VM - Zig rewrite (Zig 0.15.2)
 
 const std = @import("std");
-const lexer = @import("lexer.zig");
+const bear_lexer = @import("lexer.zig");
 const bear_io = @import("io.zig");
 const bear_parser = @import("parser.zig");
 const bear_vm = @import("vm.zig");
@@ -22,7 +22,7 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    const tokens = lexer.tokenize(src, alloc) catch |e| {
+    const tokens = bear_lexer.tokenize(src, alloc) catch |e| {
         std.debug.print("Lex error: {}\n", .{e});
         std.process.exit(1);
     };
@@ -38,21 +38,21 @@ pub fn main() !void {
     };
 }
 
-fn testLex(src: []const u8, alloc: std.mem.Allocator) ![]lexer.Token {
-    var list = try lexer.tokenize(src, alloc);
+fn testLex(src: []const u8, alloc: std.mem.Allocator) ![]bear_lexer.Token {
+    var list = try bear_lexer.tokenize(src, alloc);
     return list.toOwnedSlice(alloc);
 }
 
-fn testParse(src: []const u8, alloc: std.mem.Allocator) !lexer.Program {
-    const list = try lexer.tokenize(src, alloc);
-    errdefer lexer.freeTokens(list, alloc);
+fn testParse(src: []const u8, alloc: std.mem.Allocator) !bear_lexer.Program {
+    const list = try bear_lexer.tokenize(src, alloc);
+    errdefer bear_lexer.freeTokens(list, alloc);
     return bear_parser.parse(list.items, list, alloc);
 }
 
 fn evalMain(src: []const u8, alloc: std.mem.Allocator) !bear_vm.Value {
-    const list = try lexer.tokenize(src, alloc);
+    const list = try bear_lexer.tokenize(src, alloc);
     var prog = bear_parser.parse(list.items, list, alloc) catch |err| {
-        lexer.freeTokens(list, alloc);
+        bear_lexer.freeTokens(list, alloc);
         return err;
     };
     defer prog.deinit(alloc);
@@ -73,51 +73,51 @@ test "lexer: empty input yields only eof" {
     const toks = try testLex("", alloc);
     defer alloc.free(toks);
     try std.testing.expectEqual(@as(usize, 1), toks.len);
-    try std.testing.expectEqual(lexer.TokenTag.eof, std.meta.activeTag(toks[0]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.eof, std.meta.activeTag(toks[0]));
 }
 
 test "lexer: keywords" {
     const alloc = std.testing.allocator;
     const toks = try testLex("const add sub mul div lt gt eq ret call while alloc set struct", alloc);
     defer alloc.free(toks);
-    try std.testing.expectEqual(lexer.TokenTag.kw_const, std.meta.activeTag(toks[0]));
-    try std.testing.expectEqual(lexer.TokenTag.kw_add, std.meta.activeTag(toks[1]));
-    try std.testing.expectEqual(lexer.TokenTag.kw_sub, std.meta.activeTag(toks[2]));
-    try std.testing.expectEqual(lexer.TokenTag.kw_mul, std.meta.activeTag(toks[3]));
-    try std.testing.expectEqual(lexer.TokenTag.kw_div, std.meta.activeTag(toks[4]));
-    try std.testing.expectEqual(lexer.TokenTag.kw_lt, std.meta.activeTag(toks[5]));
-    try std.testing.expectEqual(lexer.TokenTag.kw_gt, std.meta.activeTag(toks[6]));
-    try std.testing.expectEqual(lexer.TokenTag.kw_eq, std.meta.activeTag(toks[7]));
-    try std.testing.expectEqual(lexer.TokenTag.kw_ret, std.meta.activeTag(toks[8]));
-    try std.testing.expectEqual(lexer.TokenTag.kw_call, std.meta.activeTag(toks[9]));
-    try std.testing.expectEqual(lexer.TokenTag.kw_while, std.meta.activeTag(toks[10]));
-    try std.testing.expectEqual(lexer.TokenTag.kw_alloc, std.meta.activeTag(toks[11]));
-    try std.testing.expectEqual(lexer.TokenTag.kw_set, std.meta.activeTag(toks[12]));
-    try std.testing.expectEqual(lexer.TokenTag.kw_struct, std.meta.activeTag(toks[13]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.kw_const, std.meta.activeTag(toks[0]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.kw_add, std.meta.activeTag(toks[1]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.kw_sub, std.meta.activeTag(toks[2]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.kw_mul, std.meta.activeTag(toks[3]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.kw_div, std.meta.activeTag(toks[4]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.kw_lt, std.meta.activeTag(toks[5]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.kw_gt, std.meta.activeTag(toks[6]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.kw_eq, std.meta.activeTag(toks[7]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.kw_ret, std.meta.activeTag(toks[8]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.kw_call, std.meta.activeTag(toks[9]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.kw_while, std.meta.activeTag(toks[10]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.kw_alloc, std.meta.activeTag(toks[11]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.kw_set, std.meta.activeTag(toks[12]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.kw_struct, std.meta.activeTag(toks[13]));
 }
 
 test "lexer: type keywords" {
     const alloc = std.testing.allocator;
     const toks = try testLex("int void string bool", alloc);
     defer alloc.free(toks);
-    try std.testing.expectEqual(lexer.TokenTag.ty_int, std.meta.activeTag(toks[0]));
-    try std.testing.expectEqual(lexer.TokenTag.ty_void, std.meta.activeTag(toks[1]));
-    try std.testing.expectEqual(lexer.TokenTag.ty_string, std.meta.activeTag(toks[2]));
-    try std.testing.expectEqual(lexer.TokenTag.ty_bool, std.meta.activeTag(toks[3]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.ty_int, std.meta.activeTag(toks[0]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.ty_void, std.meta.activeTag(toks[1]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.ty_string, std.meta.activeTag(toks[2]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.ty_bool, std.meta.activeTag(toks[3]));
 }
 
 test "lexer: punctuation" {
     const alloc = std.testing.allocator;
     const toks = try testLex("{ } ( ) : , . =", alloc);
     defer alloc.free(toks);
-    try std.testing.expectEqual(lexer.TokenTag.lbrace, std.meta.activeTag(toks[0]));
-    try std.testing.expectEqual(lexer.TokenTag.rbrace, std.meta.activeTag(toks[1]));
-    try std.testing.expectEqual(lexer.TokenTag.lparen, std.meta.activeTag(toks[2]));
-    try std.testing.expectEqual(lexer.TokenTag.rparen, std.meta.activeTag(toks[3]));
-    try std.testing.expectEqual(lexer.TokenTag.colon, std.meta.activeTag(toks[4]));
-    try std.testing.expectEqual(lexer.TokenTag.comma, std.meta.activeTag(toks[5]));
-    try std.testing.expectEqual(lexer.TokenTag.dot, std.meta.activeTag(toks[6]));
-    try std.testing.expectEqual(lexer.TokenTag.assign, std.meta.activeTag(toks[7]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.lbrace, std.meta.activeTag(toks[0]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.rbrace, std.meta.activeTag(toks[1]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.lparen, std.meta.activeTag(toks[2]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.rparen, std.meta.activeTag(toks[3]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.colon, std.meta.activeTag(toks[4]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.comma, std.meta.activeTag(toks[5]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.dot, std.meta.activeTag(toks[6]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.assign, std.meta.activeTag(toks[7]));
 }
 
 test "lexer: integer literals" {
@@ -132,14 +132,14 @@ test "lexer: integer literals" {
 test "lexer: string literal" {
     const alloc = std.testing.allocator;
     const toks = try testLex("\"hello world\"", alloc);
-    defer lexer.freeTokenSlice(toks, alloc);
+    defer bear_lexer.freeTokenSlice(toks, alloc);
     try std.testing.expectEqualStrings("hello world", toks[0].str);
 }
 
 test "lexer: string escape sequences" {
     const alloc = std.testing.allocator;
     const toks = try testLex("\"line1\\nline2\"", alloc);
-    defer lexer.freeTokenSlice(toks, alloc);
+    defer bear_lexer.freeTokenSlice(toks, alloc);
     try std.testing.expectEqualStrings("line1\nline2", toks[0].str);
 }
 
@@ -147,9 +147,9 @@ test "lexer: register and func sigils" {
     const alloc = std.testing.allocator;
     const toks = try testLex("%my_reg @my_func", alloc);
     defer alloc.free(toks);
-    try std.testing.expectEqual(lexer.TokenTag.reg, std.meta.activeTag(toks[0]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.reg, std.meta.activeTag(toks[0]));
     try std.testing.expectEqualStrings("my_reg", toks[0].reg);
-    try std.testing.expectEqual(lexer.TokenTag.func, std.meta.activeTag(toks[1]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.func, std.meta.activeTag(toks[1]));
     try std.testing.expectEqualStrings("my_func", toks[1].func);
 }
 
@@ -157,7 +157,7 @@ test "lexer: identifier" {
     const alloc = std.testing.allocator;
     const toks = try testLex("puts other_func", alloc);
     defer alloc.free(toks);
-    try std.testing.expectEqual(lexer.TokenTag.ident, std.meta.activeTag(toks[0]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.ident, std.meta.activeTag(toks[0]));
     try std.testing.expectEqualStrings("puts", toks[0].ident);
     try std.testing.expectEqualStrings("other_func", toks[1].ident);
 }
@@ -185,7 +185,7 @@ test "parser: minimal void function" {
     defer prog.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), prog.functions.items.len);
     try std.testing.expectEqualStrings("other_func", prog.functions.items[0].name);
-    try std.testing.expectEqual(lexer.Ty.void_, prog.functions.items[0].ret_ty);
+    try std.testing.expectEqual(bear_lexer.Ty.void_, prog.functions.items[0].ret_ty);
     try std.testing.expectEqual(@as(usize, 0), prog.functions.items[0].params.items.len);
 }
 
@@ -193,7 +193,7 @@ test "parser: function with empty parens and return type" {
     const alloc = std.testing.allocator;
     var prog = try testParse("@main(): int { ret 0 }", alloc);
     defer prog.deinit(alloc);
-    try std.testing.expectEqual(lexer.Ty.int, prog.functions.items[0].ret_ty);
+    try std.testing.expectEqual(bear_lexer.Ty.int, prog.functions.items[0].ret_ty);
 }
 
 test "parser: call without args" {
@@ -219,7 +219,7 @@ test "parser: assign const int" {
     var prog = try testParse("@main(): int { %x = const 42 ret 0 }", alloc);
     defer prog.deinit(alloc);
     const stmt = prog.functions.items[0].body.items[0];
-    try std.testing.expectEqual(@as(lexer.RegIdx, 0), stmt.assign.reg);
+    try std.testing.expectEqual(@as(bear_lexer.RegIdx, 0), stmt.assign.reg);
 }
 
 test "parser: assign add expr" {
@@ -415,7 +415,7 @@ test "interpreter: alloc returns ptr" {
 
 test "interpreter: no main is error" {
     const alloc = std.testing.allocator;
-    const list = try lexer.tokenize("@other: void { ret 0 }", alloc);
+    const list = try bear_lexer.tokenize("@other: void { ret 0 }", alloc);
     var prog = try bear_parser.parse(list.items, list, alloc);
     defer prog.deinit(alloc);
     var vm = try bear_vm.Vm.init(&prog, alloc);
