@@ -2,6 +2,19 @@ const std = @import("std");
 const lexer = @import("lexer.zig");
 const bear_io = @import("io.zig");
 
+pub fn run(program: *const lexer.Program, alloc: std.mem.Allocator) !void {
+    var vm = try Vm.init(program, alloc);
+    defer vm.deinit();
+    const main_fn = vm.findFunc("main") orelse return error.NoMainFunction;
+    const env = try alloc.alloc(Value, main_fn.n_regs);
+    defer {
+        for (env) |*v| v.deinit(alloc);
+        alloc.free(env);
+    }
+    @memset(env, .void_);
+    _ = try vm.execBody(main_fn.body.items, env);
+}
+
 pub const Value = union(enum) {
     int: i64,
     str: []const u8,
