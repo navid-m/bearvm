@@ -164,14 +164,11 @@ impl<'a> Vm<'a> {
                 }
                 Ok(Value::Struct(name.clone(), fields))
             }
-            Expr::Named(name) => {
-                // named constants
-                match name.as_str() {
-                    "READ" => Ok(Value::Int(0)),
-                    "WRITE" => Ok(Value::Int(1)),
-                    _ => Err(format!("Unknown named constant: {name}")),
-                }
-            }
+            Expr::Named(name) => match name.as_str() {
+                "READ" => Ok(Value::Int(0)),
+                "WRITE" => Ok(Value::Int(1)),
+                _ => Err(format!("Unknown named constant: {name}")),
+            },
             Expr::Call(name, args) => self.call_func(name, args, env),
         }
     }
