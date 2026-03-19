@@ -6,9 +6,6 @@ const bear_io = @import("io.zig");
 const bear_parser = @import("parser.zig");
 const bear_vm = @import("vm.zig");
 
-pub var stdout_buf: [65536]u8 = undefined;
-pub var stdout_pos: usize = 0;
-
 fn run(program: *const lexer.Program, alloc: std.mem.Allocator) !void {
     var vm = bear_vm.Vm.init(program, alloc);
     const main_fn = vm.findFunc("main") orelse return error.NoMainFunction;

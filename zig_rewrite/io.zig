@@ -1,18 +1,20 @@
-const bear_main = @import("bear.zig");
 const std = @import("std");
 
+var stdout_buf: [65536]u8 = undefined;
+var stdout_pos: usize = 0;
+
 pub fn flushStdout() void {
-    if (bear_main.stdout_pos == 0) return;
-    _ = std.fs.File.stdout().writeAll(bear_main.stdout_buf[0..bear_main.stdout_pos]) catch {};
-    bear_main.stdout_pos = 0;
+    if (stdout_pos == 0) return;
+    _ = std.fs.File.stdout().writeAll(stdout_buf[0..stdout_pos]) catch {};
+    stdout_pos = 0;
 }
 
 pub fn writeStdout(s: []const u8) void {
-    if (bear_main.stdout_pos + s.len > bear_main.stdout_buf.len) flushStdout();
-    if (s.len > bear_main.stdout_buf.len) {
+    if (stdout_pos + s.len > stdout_buf.len) flushStdout();
+    if (s.len > stdout_buf.len) {
         _ = std.fs.File.stdout().writeAll(s) catch {};
         return;
     }
-    @memcpy(bear_main.stdout_buf[bear_main.stdout_pos..][0..s.len], s);
-    bear_main.stdout_pos += s.len;
+    @memcpy(stdout_buf[stdout_pos..][0..s.len], s);
+    stdout_pos += s.len;
 }
