@@ -5,6 +5,8 @@ const bear_lexer = @import("lexer.zig");
 const bear_io = @import("io.zig");
 const bear_parser = @import("parser.zig");
 const bear_vm = @import("vm.zig");
+const bear_qbe = @import("qbe_emitter.zig");
+const bear_llvm = @import("llvm_emitter.zig");
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -13,12 +15,34 @@ pub fn main() !void {
     const argv = try std.process.argsAlloc(alloc);
 
     if (argv.len < 2) {
-        std.debug.print("Usage: bear <file.bear>\n", .{});
+        printUsage();
         std.process.exit(1);
     }
 
-    const src = std.fs.cwd().readFileAlloc(alloc, argv[1], 10 * 1024 * 1024) catch |e| {
-        std.debug.print("Error reading {s}: {}\n", .{ argv[1], e });
+    const first = argv[1];
+    const is_qbe = std.mem.eql(u8, first, "qbe");
+    const is_llvm = std.mem.eql(u8, first, "llvm");
+
+    if (is_qbe or is_llvm) {
+        if (argv.len < 3) {
+            printUsage();
+            std.process.exit(1);
+        }
+        const path = argv[2];
+        const compile = argv.len >= 4 and
+            (std.mem.eql(u8, argv[3], "-c") or std.mem.eql(u8, argv[3], "--compile"));
+        const program = loadProgram(path, alloc);
+        if (is_qbe) {
+            runQbe(&program, path, compile, alloc);
+        } else {
+            runLlvm(&program, path, compile, alloc);
+        }
+        return;
+    }
+
+    // default: interpret
+    const src = std.fs.cwd().readFileAlloc(alloc, first, 10 * 1024 * 1024) catch |e| {
+        std.debug.print("Error reading {s}: {}\n", .{ first, e });
         std.process.exit(1);
     };
 
@@ -36,6 +60,97 @@ pub fn main() !void {
         std.debug.print("Runtime error: {}\n", .{e});
         std.process.exit(1);
     };
+}
+
+fn printUsage() void {
+    std.debug.print(
+        \\Usage:
+        \\  bear <file.bear>              Run via interpreter
+        \\  bear qbe <file.bear>          Emit QBE IR
+        \\  bear qbe <file.bear> -c       Compile with QBE + cc
+        \\  bear llvm <file.bear>         Emit LLVM IR
+        \\  bear llvm <file.bear> -c      Compile with llc + cc
+        \\
+    , .{});
+}
+
+fn loadProgram(path: []const u8, alloc: std.mem.Allocator) bear_lexer.Program {
+    const src = std.fs.cwd().readFileAlloc(alloc, path, 10 * 1024 * 1024) catch |e| {
+        std.debug.print("Error reading {s}: {}\n", .{ path, e });
+        std.process.exit(1);
+    };
+    const tokens = bear_lexer.tokenize(src, alloc) catch |e| {
+        std.debug.print("Lex error: {}\n", .{e});
+        std.process.exit(1);
+    };
+    return bear_parser.parse(tokens.items, tokens, alloc) catch |e| {
+        std.debug.print("Parse error: {}\n", .{e});
+        std.process.exit(1);
+    };
+}
+
+fn runQbe(program: *const bear_lexer.Program, path: []const u8, compile: bool, alloc: std.mem.Allocator) void {
+    const ir = bear_qbe.emit(program, alloc) catch |e| {
+        std.debug.print("QBE codegen error: {}\n", .{e});
+        std.process.exit(1);
+    };
+
+    if (!compile) {
+        std.debug.print("{s}", .{ir});
+        return;
+    }
+
+    const stem = std.fs.path.stem(path);
+    const ir_path = std.fmt.allocPrint(alloc, "/tmp/{s}.ssa", .{stem}) catch unreachable;
+    const asm_path = std.fmt.allocPrint(alloc, "/tmp/{s}.s", .{stem}) catch unreachable;
+    const out_path = std.fmt.allocPrint(alloc, "./{s}", .{stem}) catch unreachable;
+
+    std.fs.cwd().writeFile(.{ .sub_path = ir_path, .data = ir }) catch |e| {
+        std.debug.print("Failed to write IR: {}\n", .{e});
+        std.process.exit(1);
+    };
+
+    runCmd(alloc, &.{ "qbe", "-o", asm_path, ir_path }, "qbe");
+    runCmd(alloc, &.{ "cc", asm_path, "-o", out_path }, "cc");
+    std.debug.print("Compiled to {s}\n", .{out_path});
+}
+
+fn runLlvm(program: *const bear_lexer.Program, path: []const u8, compile: bool, alloc: std.mem.Allocator) void {
+    const ir = bear_llvm.emit(program, alloc) catch |e| {
+        std.debug.print("LLVM codegen error: {}\n", .{e});
+        std.process.exit(1);
+    };
+
+    if (!compile) {
+        std.debug.print("{s}", .{ir});
+        return;
+    }
+
+    const stem = std.fs.path.stem(path);
+    const ir_path = std.fmt.allocPrint(alloc, "/tmp/{s}.ll", .{stem}) catch unreachable;
+    const obj_path = std.fmt.allocPrint(alloc, "/tmp/{s}.o", .{stem}) catch unreachable;
+    const out_path = std.fmt.allocPrint(alloc, "./{s}", .{stem}) catch unreachable;
+
+    std.fs.cwd().writeFile(.{ .sub_path = ir_path, .data = ir }) catch |e| {
+        std.debug.print("Failed to write IR: {}\n", .{e});
+        std.process.exit(1);
+    };
+
+    runCmd(alloc, &.{ "llc", "-filetype=obj", "-o", obj_path, ir_path }, "llc");
+    runCmd(alloc, &.{ "cc", obj_path, "-o", out_path }, "cc");
+    std.debug.print("Compiled to {s}\n", .{out_path});
+}
+
+fn runCmd(alloc: std.mem.Allocator, argv: []const []const u8, name: []const u8) void {
+    var child = std.process.Child.init(argv, alloc);
+    const term = child.spawnAndWait() catch |e| {
+        std.debug.print("Failed to run {s}: {}\n", .{ name, e });
+        std.process.exit(1);
+    };
+    if (term != .Exited or term.Exited != 0) {
+        std.debug.print("{s} failed\n", .{name});
+        std.process.exit(1);
+    }
 }
 
 fn testLex(src: []const u8, alloc: std.mem.Allocator) ![]bear_lexer.Token {
