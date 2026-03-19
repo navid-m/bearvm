@@ -1,0 +1,9 @@
+
+@main(): int {
+	%f = call open("out.txt", WRITE)
+
+	call write(%f, "Hello, world.", 13)
+
+	call close(%f)
+	ret 0
+}

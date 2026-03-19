@@ -1,0 +1,8 @@
+@main(): int {
+	%f = call open("test.txt", READ)
+	%buf = alloc 1024
+	%n = call read(%f, %buf, 1024)
+	call puts(%buf)
+	call close(%f)
+	ret 0
+}

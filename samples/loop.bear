@@ -1,0 +1,10 @@
+@main(): int {
+	%i = const 0
+
+	while (lt %i, 10) {
+		call puts("looping")
+		%i = add %i, 1
+	}
+
+	ret 0
+}

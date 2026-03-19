@@ -1,0 +1,19 @@
+struct Person {
+	name: string
+	age: int
+}
+
+@main(): int {
+	%p = Person {
+		name: "Alice"
+		age: 25
+	}
+
+	call puts(%p.name)
+
+	set %p.age = add %p.age, 1
+
+	call puts(%p.age)
+
+	ret 0
+}
