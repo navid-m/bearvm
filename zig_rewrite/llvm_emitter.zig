@@ -336,6 +336,7 @@ const Emitter = struct {
                 var buf: [24]u8 = undefined;
                 const s = std.fmt.bufPrint(&buf, ", i64 {d}\n", .{idx}) catch unreachable;
                 try self.out.appendSlice(self.alloc, s);
+                try self.ptr_tmps.put(self.alloc, t, {});
                 return .{ .tmp = t };
             },
             .get_index_ref => |gir| {
@@ -349,6 +350,7 @@ const Emitter = struct {
                 try self.out.appendSlice(self.alloc, ", i64 ");
                 try self.writeSlot(idx_slot);
                 try self.out.append(self.alloc, '\n');
+                try self.ptr_tmps.put(self.alloc, t, {});
                 return .{ .tmp = t };
             },
             .float_lit => |f| {
@@ -389,6 +391,14 @@ const Emitter = struct {
     fn slotIsFloat(self: *Emitter, s: Slot) bool {
         return switch (s) {
             .tmp => |id| self.float_tmps.contains(id),
+            else => false,
+        };
+    }
+
+    fn slotIsPtr(self: *Emitter, s: Slot) bool {
+        return switch (s) {
+            .tmp => |id| self.ptr_tmps.contains(id),
+            .param => true,
             else => false,
         };
     }
@@ -561,6 +571,17 @@ const Emitter = struct {
                 try self.out.appendSlice(self.alloc, ":\n");
             },
             .label => |name| {
+                const trimmed = std.mem.trimRight(u8, self.out.items, " \t\n");
+                const last_nl = std.mem.lastIndexOfScalar(u8, trimmed, '\n') orelse 0;
+                const last_line = std.mem.trimLeft(u8, trimmed[last_nl..], "\n");
+                const has_terminator = std.mem.startsWith(u8, last_line, "  br ") or
+                    std.mem.startsWith(u8, last_line, "  ret ") or
+                    std.mem.endsWith(u8, last_line, ":");
+                if (!has_terminator) {
+                    try self.out.appendSlice(self.alloc, "  br label %");
+                    try self.out.appendSlice(self.alloc, name);
+                    try self.out.append(self.alloc, '\n');
+                }
                 try self.out.appendSlice(self.alloc, name);
                 try self.out.appendSlice(self.alloc, ":\n");
             },
@@ -583,7 +604,60 @@ const Emitter = struct {
                 try self.out.appendSlice(self.alloc, br.false_label);
                 try self.out.append(self.alloc, '\n');
             },
-            .store => return error.UnsupportedStmt,
+            .store => |s| {
+                const ptr = env[s.ptr];
+                if (s.expr.* == .struct_lit) {
+                    const sl = s.expr.struct_lit;
+                    const fields = blk: {
+                        if (sl.name.len > 0) {
+                            break :blk self.structs.get(sl.name) orelse return error.UnknownStruct;
+                        }
+                        var it = self.structs.iterator();
+                        while (it.next()) |entry| {
+                            if (entry.value_ptr.*.len == sl.fields.items.len) {
+                                break :blk entry.value_ptr.*;
+                            }
+                        }
+                        return error.UnknownStruct;
+                    };
+                    var buf: [32]u8 = undefined;
+                    for (fields, 0..) |fd, i| {
+                        var fval: ?*lexer.Expr = null;
+                        for (sl.fields.items) |fi| {
+                            if (std.mem.eql(u8, fi.name, fd.name)) {
+                                fval = fi.expr;
+                                break;
+                            }
+                        }
+                        const field_expr = fval orelse return error.MissingField;
+                        const v = try self.emitExpr(field_expr, env);
+                        const is_ptr_val = self.isPtr(field_expr, env);
+                        const gep = self.fresh();
+                        try self.out.appendSlice(self.alloc, "  ");
+                        try self.writeTmp(gep);
+                        try self.out.appendSlice(self.alloc, " = getelementptr inbounds i64, ptr ");
+                        try self.writeSlot(ptr);
+                        const off = std.fmt.bufPrint(&buf, ", i64 {d}\n", .{i}) catch unreachable;
+                        try self.out.appendSlice(self.alloc, off);
+                        try self.out.appendSlice(self.alloc, if (is_ptr_val) "  store ptr " else "  store i64 ");
+                        try self.writeSlot(v);
+                        try self.out.appendSlice(self.alloc, ", ptr ");
+                        try self.writeTmp(gep);
+                        try self.out.append(self.alloc, '\n');
+                    }
+                } else {
+                    const is_ptr_val = self.isPtr(s.expr, env);
+                    const v = try self.emitExpr(s.expr, env);
+                    const store_ty: []const u8 = if (is_ptr_val or self.slotIsPtr(v)) "ptr" else if (self.slotIsFloat(v)) "double" else "i64";
+                    try self.out.appendSlice(self.alloc, "  store ");
+                    try self.out.appendSlice(self.alloc, store_ty);
+                    try self.out.append(self.alloc, ' ');
+                    try self.writeSlot(v);
+                    try self.out.appendSlice(self.alloc, ", ptr ");
+                    try self.writeSlot(ptr);
+                    try self.out.append(self.alloc, '\n');
+                }
+            },
             .free => |ptr_reg| {
                 try self.out.appendSlice(self.alloc, "  call void @free(ptr ");
                 try self.writeSlot(env[ptr_reg]);

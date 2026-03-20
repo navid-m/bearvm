@@ -14,7 +14,7 @@ entry:
     store %age_ptr, %new_age
 
     %age_val2 = load %age_ptr
-    call puts(%age_val2)
+    call putf(%age_val2)
     call flush()
     %arr = alloc_array int, 5
 
@@ -48,7 +48,7 @@ sum_loop_body:
     jmp sum_loop_cond
 
 sum_loop_end:
-    call puts(%sum)
+    call putf(%sum)
     call flush()
     ret 0
 }
