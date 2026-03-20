@@ -398,6 +398,9 @@ const Emitter = struct {
                 try self.writeSlot(v);
                 try self.out.append(self.alloc, '\n');
             },
+            .ret_void => {
+                try self.out.appendSlice(self.alloc, "  ret\n");
+            },
             .while_ => |wh| {
                 const lc = self.loop_ctr;
                 self.loop_ctr += 1;

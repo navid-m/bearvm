@@ -241,6 +241,9 @@ const Printer = struct {
                 defer alloc.free(cp);
                 try self.printExpr(alloc, e, cp, true, depth + 1);
             },
+            .ret_void => {
+                self.node(prefix, is_last, depth, "ret void");
+            },
             .while_ => |w| {
                 self.node(prefix, is_last, depth, "while");
                 const cp = try childPrefix(alloc, prefix, is_last);

@@ -365,6 +365,10 @@ const Parser = struct {
             },
             .kw_ret => blk: {
                 _ = self.advance();
+                const next = std.meta.activeTag(self.peek());
+                if (next == .rbrace or next == .eof or next == .func) {
+                    break :blk .ret_void;
+                }
                 break :blk .{ .ret = try self.parseExpr(rm) };
             },
             .kw_jmp => blk: {
@@ -447,8 +451,10 @@ const Parser = struct {
             _ = self.advance();
             while (std.meta.activeTag(self.peek()) != .rparen) {
                 const pname = try self.expectReg();
-                _ = try self.expectTag(.colon);
-                const ty = try self.parseTy();
+                const ty: lexer.Ty = if (std.meta.activeTag(self.peek()) == .colon) blk: {
+                    _ = self.advance();
+                    break :blk try self.parseTy();
+                } else .int;
                 const idx = try rm.intern(pname);
                 try params.append(self.alloc, .{ .name = pname, .ty = ty, .idx = idx });
                 if (std.meta.activeTag(self.peek()) == .comma) _ = self.advance();

@@ -389,6 +389,10 @@ const Compiler = struct {
                     self.emitEpilogue();
                 },
 
+                .ret_void => {
+                    self.emitEpilogue();
+                },
+
                 .while_ => |w| {
                     const loop_top = self.buf.here();
 

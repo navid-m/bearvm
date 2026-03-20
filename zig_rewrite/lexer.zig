@@ -352,6 +352,7 @@ pub const Stmt = union(enum) {
     store: struct { ptr: RegIdx, expr: *Expr },
     free: RegIdx,
     arena_destroy: RegIdx,
+    ret_void,
 
     pub fn deinit(self: *Stmt, alloc: std.mem.Allocator) void {
         switch (self.*) {

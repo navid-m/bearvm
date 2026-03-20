@@ -655,6 +655,10 @@ const Compiler = struct {
                 _ = try self.emit(.{ .op = .ret, .flag = 0, .dst = r, .a = 0, .b = 0 });
             },
 
+            .ret_void => {
+                _ = try self.emit(.{ .op = .ret_void, .flag = 0, .dst = 0, .a = 0, .b = 0 });
+            },
+
             .jmp => |target| {
                 const patch_pc: u32 = @intCast(self.code.items.len);
                 _ = try self.emit(.{ .op = .jmp, .flag = 0, .dst = 0, .a = 0, .b = 0 });
