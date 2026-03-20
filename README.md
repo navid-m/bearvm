@@ -29,19 +29,9 @@ An AArch64 JIT compiler is under development, targeting Apple Silicon. It genera
 
 The JIT aims to remove interpreter dispatch overhead from hot loops and parallel task bodies.
 
-### Planned Compilation Backends
-
-The same IR can be lowered to:
-
-- QBE intermediate language → produces small, fast native executables with a minimal build toolchain  
-- LLVM IR → enables optimization pipelines and support for additional architectures  
-
-This multi-backend approach allows Axe programs to be interpreted for development, JIT-compiled for interactive or server workloads, or ahead-of-time compiled for deployment.
-
-
 ## Project Status
 
-BearVM remains in early development. The interpreter handles basic programs reliably. The AArch64 JIT is partial but progressing toward full function compilation. Concurrency runtime support (task scheduling, synchronization) is implemented at the IR level with ongoing work on efficient underlying execution.
+BearVM remains in early development. Concurrency runtime support (task scheduling, synchronization) is implemented at the IR level with ongoing work on efficient underlying execution.
 
 No API or file format stability is guaranteed at this time.
 
