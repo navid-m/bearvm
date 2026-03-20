@@ -165,12 +165,12 @@ pub const BearArena = struct {
 
 const StructVal = struct { name: []const u8, fields: std.StringArrayHashMap(Value) };
 const BuiltinTag = enum(u8) { puts, open, read, write, close, flush, putf };
-
 const builtin_map = std.StaticStringMap(BuiltinTag).initComptime(.{
     .{ "puts", .puts },   .{ "open", .open },   .{ "read", .read },
     .{ "write", .write }, .{ "close", .close }, .{ "flush", .flush },
     .{ "putf", .putf },
 });
+
 const FileHandle = union(enum) { read: std.fs.File, write: std.fs.File };
 const CallTarget = union(enum) { builtin: BuiltinTag, user: u32 };
 
@@ -287,6 +287,7 @@ const Compiler = struct {
     label_idx: std.StringHashMapUnmanaged(u16),
     patches: std.ArrayListUnmanaged(Patch),
     call_cache: *const std.StringHashMapUnmanaged(CallTarget),
+    max_reg: u16,
 
     const Patch = struct { pc: u32, field: enum { a, b }, label: []const u8 };
 
@@ -304,6 +305,7 @@ const Compiler = struct {
             .label_idx = .{},
             .patches = .empty,
             .call_cache = cc,
+            .max_reg = 0,
         };
     }
     fn deinit(self: *Compiler) void {
@@ -341,6 +343,7 @@ const Compiler = struct {
     fn emit(self: *Compiler, ins: Instr) !u32 {
         const pc: u32 = @intCast(self.code.items.len);
         try self.code.append(self.alloc, ins);
+        if (ins.dst > self.max_reg) self.max_reg = ins.dst;
         return pc;
     }
 
@@ -480,7 +483,6 @@ const Compiler = struct {
         }
     }
 
-    /// Binary ops with optional immediate inlining for integer literals.
     fn compileBinOp(self: *Compiler, expr: *const lexer.Expr, dst: u16) !u16 {
         const op_tag: Op, const bop: lexer.BinOp = switch (expr.*) {
             .add => |b| .{ .add, b },
@@ -524,7 +526,6 @@ const Compiler = struct {
         return dst;
     }
 
-    /// Build arg list and push an ArgRange; returns the arg_range index as u16.
     fn buildArgRange(self: *Compiler, arg_exprs: []*lexer.Expr, base_scratch: u16) !u16 {
         const ar_start: u32 = @intCast(self.arg_regs.items.len);
         for (arg_exprs, 0..) |ae, i| {
@@ -575,7 +576,7 @@ const Compiler = struct {
             },
 
             .call => |c| {
-                const ar_idx = try self.buildArgRange(c.args.items, 1);
+                const ar_idx = try self.buildArgRange(c.args.items, self.max_reg +% 1);
                 const target = self.call_cache.get(c.name) orelse return error.UndefinedFunction;
                 switch (target) {
                     .builtin => |tag| _ = try self.emit(.{ .op = .call_builtin_void, .flag = 0, .dst = 0, .a = @intFromEnum(tag), .b = ar_idx }),
@@ -584,7 +585,7 @@ const Compiler = struct {
             },
 
             .ret => |e| {
-                const r = try self.compileExpr(e, 0);
+                const r = try self.compileExpr(e, self.max_reg +% 1);
                 _ = try self.emit(.{ .op = .ret, .flag = 0, .dst = r, .a = 0, .b = 0 });
             },
 
@@ -603,7 +604,8 @@ const Compiler = struct {
 
             .while_ => |*w| {
                 const cond_pc: u32 = @intCast(self.code.items.len);
-                const cond_r = try self.compileExpr(w.cond, 0);
+                const cond_scratch: u16 = self.max_reg +% 1;
+                const cond_r = try self.compileExpr(w.cond, cond_scratch);
                 const br_pc: u32 = @intCast(self.code.items.len);
                 _ = try self.emit(.{ .op = .br_if, .flag = 0, .dst = cond_r, .a = 0, .b = 0 });
                 try self.compileStmts(w.body.items);
@@ -626,8 +628,9 @@ const Compiler = struct {
     }
 
     fn finish(self: *Compiler, n_regs: u16) !CompiledFn {
+        const actual_n_regs: u16 = @max(n_regs, if (self.code.items.len == 0) 0 else self.max_reg + 1);
         return .{
-            .n_regs = n_regs,
+            .n_regs = actual_n_regs,
             .code = try self.code.toOwnedSlice(self.alloc),
             .int_pool = try self.int_pool.toOwnedSlice(self.alloc),
             .float_pool = try self.float_pool.toOwnedSlice(self.alloc),
@@ -775,12 +778,11 @@ pub const Vm = struct {
             break :blk try self.alloc.alloc(Value, n);
         };
         defer {
-            if (used_slab) self.call_stack.pop(n) else {
-                for (env) |*v| v.deinit(self.alloc);
-                self.alloc.free(env);
-            }
+            for (env) |*v| v.deinit(self.alloc);
+            if (used_slab) self.call_stack.pop(n) else self.alloc.free(env);
         }
 
+        @memset(env, .void_);
         for (func.params.items, 0..) |param, i|
             env[param.idx] = args[i];
 
