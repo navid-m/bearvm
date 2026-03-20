@@ -140,6 +140,17 @@ const Printer = struct {
                 defer alloc.free(cp);
                 try self.printExpr(alloc, aa.size, cp, true, depth + 1);
             },
+            .phi => |arms| {
+                self.node(prefix, is_last, depth, "phi");
+                const cp = try childPrefix(alloc, prefix, is_last);
+                defer alloc.free(cp);
+                for (arms.items, 0..) |arm, i| {
+                    const last = i == arms.items.len - 1;
+                    const lbl = try std.fmt.allocPrint(alloc, "{s}: %{d}", .{ arm.label, arm.reg });
+                    defer alloc.free(lbl);
+                    self.node(cp, last, depth + 1, lbl);
+                }
+            },
             .alloc_type => |name| {
                 const label = try std.fmt.allocPrint(alloc, "alloc_type({s})", .{name});
                 defer alloc.free(label);

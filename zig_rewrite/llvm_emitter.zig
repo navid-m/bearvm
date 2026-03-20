@@ -192,6 +192,22 @@ const Emitter = struct {
             // spawn/sync: not supported in LLVM backend, treat spawn as a plain call
             .spawn => |sp| return self.emitCallExpr(sp.name, sp.args.items, env),
             .sync => |r| return env[r],
+            .phi => |arms| {
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                try self.out.appendSlice(self.alloc, " = phi i64");
+                for (arms.items, 0..) |arm, i| {
+                    if (i > 0) try self.out.append(self.alloc, ',');
+                    try self.out.appendSlice(self.alloc, " [ ");
+                    try self.writeSlot(env[arm.reg]);
+                    try self.out.appendSlice(self.alloc, ", %");
+                    try self.out.appendSlice(self.alloc, arm.label);
+                    try self.out.appendSlice(self.alloc, " ]");
+                }
+                try self.out.append(self.alloc, '\n');
+                return .{ .tmp = t };
+            },
             .free, .arena_create, .arena_alloc,
             .alloc_type, .alloc_array, .load, .get_field_ref, .get_index_ref => return error.UnsupportedExpr,
         }

@@ -340,6 +340,19 @@ pub const Vm = struct {
         return @intCast(self.files.items.len - 1);
     }
 
+    /// Evaluate an expression with predecessor label context (needed for phi).
+    fn evalExprWithPrev(self: *Vm, expr: *const lexer.Expr, env: []Value, prev_label: ?[]const u8) anyerror!Value {
+        if (expr.* == .phi) {
+            const arms = expr.phi;
+            const from = prev_label orelse return error.PhiWithNoPredecessor;
+            for (arms.items) |arm| {
+                if (std.mem.eql(u8, arm.label, from)) return env[arm.reg];
+            }
+            return error.PhiNoMatchingArm;
+        }
+        return self.evalExpr(expr, env);
+    }
+
     /// Evaluate an expression. Hot path — keep it tight.
     fn evalExpr(self: *Vm, expr: *const lexer.Expr, env: []Value) anyerror!Value {
         var cur = expr;
@@ -572,6 +585,7 @@ pub const Vm = struct {
                     @memset(buf, 0);
                     return .{ .ptr = buf };
                 },
+                .phi => return error.PhiWithNoPredecessor,
             }
         }
     }
@@ -717,10 +731,12 @@ pub const Vm = struct {
 
     pub fn execBody(self: *Vm, stmts: []const lexer.Stmt, env: []Value, label_map: *const LabelMap) anyerror!?Value {
         var pc: usize = 0;
+        var prev_label: ?[]const u8 = null;
+        var cur_label: ?[]const u8 = null;
         while (pc < stmts.len) {
             switch (stmts[pc]) {
                 .assign => |a| {
-                    env[a.reg] = try self.evalExpr(a.expr, env);
+                    env[a.reg] = try self.evalExprWithPrev(a.expr, env, prev_label);
                     pc += 1;
                 },
                 .set_field => |sf| {
@@ -823,8 +839,12 @@ pub const Vm = struct {
                     }
                     pc += 1;
                 },
-                .label => pc += 1,
+                .label => |name| {
+                    cur_label = name;
+                    pc += 1;
+                },
                 .jmp => |target| {
+                    prev_label = cur_label;
                     pc = label_map.get(target) orelse return error.UndefinedLabel;
                 },
                 .br_if => |br| {
@@ -834,6 +854,7 @@ pub const Vm = struct {
                         else => return error.TypeMismatch,
                     };
                     const target = if (taken) br.true_label else br.false_label;
+                    prev_label = cur_label;
                     pc = label_map.get(target) orelse return error.UndefinedLabel;
                 },
             }

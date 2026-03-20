@@ -211,7 +211,21 @@ const Emitter = struct {
                 try self.out.appendSlice(self.alloc, ")\n");
                 return .{ .tmp = t };
             },
-            .arena_create => {
+            .phi => |arms| {
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                try self.out.appendSlice(self.alloc, " =w phi");
+                for (arms.items, 0..) |arm, i| {
+                    if (i > 0) try self.out.append(self.alloc, ',');
+                    try self.out.appendSlice(self.alloc, " @");
+                    try self.out.appendSlice(self.alloc, arm.label);
+                    try self.out.append(self.alloc, ' ');
+                    try self.writeSlot(env[arm.reg]);
+                }
+                try self.out.append(self.alloc, '\n');
+                return .{ .tmp = t };
+            },            .arena_create => {
                 const t = self.fresh();
                 try self.out.appendSlice(self.alloc, "  ");
                 try self.writeTmp(t);

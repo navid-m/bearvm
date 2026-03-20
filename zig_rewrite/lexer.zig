@@ -36,6 +36,7 @@ pub const TokenTag = enum(u8) {
     kw_arena_create,
     kw_arena_alloc,
     kw_arena_destroy,
+    kw_phi,
     ty_int,
     ty_void,
     ty_string,
@@ -44,6 +45,8 @@ pub const TokenTag = enum(u8) {
     rbrace,
     lparen,
     rparen,
+    lbracket,
+    rbracket,
     colon,
     comma,
     dot,
@@ -86,6 +89,7 @@ pub const Token = union(TokenTag) {
     kw_arena_create,
     kw_arena_alloc,
     kw_arena_destroy,
+    kw_phi,
     ty_int,
     ty_void,
     ty_string,
@@ -94,6 +98,8 @@ pub const Token = union(TokenTag) {
     rbrace,
     lparen,
     rparen,
+    lbracket,
+    rbracket,
     colon,
     comma,
     dot,
@@ -133,6 +139,7 @@ pub fn keywordToken(word: []const u8) ?Token {
         .{ "arena_create", Token.kw_arena_create },
         .{ "arena_alloc", Token.kw_arena_alloc },
         .{ "arena_destroy", Token.kw_arena_destroy },
+        .{ "phi", Token.kw_phi },
         .{ "int", Token.ty_int },
         .{ "void", Token.ty_void },
         .{ "string", Token.ty_string },
@@ -204,6 +211,14 @@ pub fn tokenize(src: []const u8, alloc: std.mem.Allocator) !std.ArrayList(Token)
             },
             '=' => {
                 try tokens.append(alloc, .assign);
+                i += 1;
+            },
+            '[' => {
+                try tokens.append(alloc, .lbracket);
+                i += 1;
+            },
+            ']' => {
+                try tokens.append(alloc, .rbracket);
                 i += 1;
             },
             '"' => {
@@ -334,6 +349,7 @@ pub const Stmt = union(enum) {
 
 pub const BinOp = struct { a: *Expr, b: *Expr };
 pub const FieldInit = struct { name: []const u8, expr: *Expr };
+pub const PhiArm = struct { label: []const u8, reg: RegIdx };
 pub const Expr = union(enum) {
     int: i64,
     str: []const u8,
@@ -363,6 +379,7 @@ pub const Expr = union(enum) {
     free: RegIdx,
     arena_create,
     arena_alloc: struct { arena: RegIdx, size: *Expr },
+    phi: std.ArrayListUnmanaged(PhiArm),
 };
 
 pub const ExprSlab = struct {
@@ -379,6 +396,7 @@ pub const ExprSlab = struct {
                 .struct_lit => |*sl| sl.fields.deinit(alloc),
                 .call => |*c| c.args.deinit(alloc),
                 .spawn => |*s| s.args.deinit(alloc),
+                .phi => |*arms| arms.deinit(alloc),
                 else => {},
             }
         }

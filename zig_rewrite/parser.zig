@@ -190,6 +190,21 @@ const Parser = struct {
                 const size_expr = try self.parseExpr(rm);
                 break :blk try self.box(.{ .arena_alloc = .{ .arena = arena_idx, .size = size_expr } });
             },
+            .kw_phi => blk: {
+                _ = self.advance();
+                _ = try self.expectTag(.lbracket);
+                var arms: std.ArrayList(lexer.PhiArm) = .empty;
+                while (std.meta.activeTag(self.peek()) != .rbracket) {
+                    const lbl = try self.expectIdent();
+                    _ = try self.expectTag(.colon);
+                    const r = try self.expectReg();
+                    const idx = try rm.intern(r);
+                    try arms.append(self.alloc, .{ .label = lbl, .reg = idx });
+                    if (std.meta.activeTag(self.peek()) == .comma) _ = self.advance();
+                }
+                _ = try self.expectTag(.rbracket);
+                break :blk try self.box(.{ .phi = arms });
+            },
             .kw_alloc => blk: {
                 _ = self.advance();
                 if (std.meta.activeTag(self.peek()) == .ident) {
