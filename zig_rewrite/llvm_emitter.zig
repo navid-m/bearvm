@@ -207,8 +207,109 @@ const Emitter = struct {
                 try self.out.append(self.alloc, '\n');
                 return .{ .tmp = t };
             },
-            .free, .arena_create, .arena_alloc,
-            .alloc_type, .alloc_array, .load, .get_field_ref, .get_index_ref => return error.UnsupportedExpr,
+            .free => |ptr_reg| {
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                try self.out.appendSlice(self.alloc, " = call i32 @free(ptr ");
+                try self.writeSlot(env[ptr_reg]);
+                try self.out.appendSlice(self.alloc, ")\n");
+                return .{ .tmp = t };
+            },
+            .arena_create => {
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                try self.out.appendSlice(self.alloc, " = call ptr @bear_arena_create()\n");
+                return .{ .tmp = t };
+            },
+            .arena_alloc => |aa| {
+                const size_slot = try self.emitExpr(aa.size, env);
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                try self.out.appendSlice(self.alloc, " = call ptr @bear_arena_alloc(ptr ");
+                try self.writeSlot(env[aa.arena]);
+                try self.out.appendSlice(self.alloc, ", i64 ");
+                try self.writeSlot(size_slot);
+                try self.out.appendSlice(self.alloc, ")\n");
+                return .{ .tmp = t };
+            },
+            .alloc_type => |type_name| {
+                const struct_def = blk: {
+                    var it = self.structs.iterator();
+                    while (it.next()) |entry| {
+                        if (std.mem.eql(u8, entry.key_ptr.*, type_name)) {
+                            break :blk entry.value_ptr.*;
+                        }
+                    }
+                    return error.UnknownType;
+                };
+                const size = struct_def.len * 8;
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                var buf: [32]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, " = alloca i8, i64 {d}, align 8\n", .{size}) catch unreachable;
+                try self.out.appendSlice(self.alloc, s);
+                return .{ .tmp = t };
+            },
+            .alloc_array => |aa| {
+                const count_slot = try self.emitExpr(aa.count, env);
+                const elem_size: i64 = 8;
+                const size_tmp = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(size_tmp);
+                var buf: [32]u8 = undefined;
+                const mul_str = std.fmt.bufPrint(&buf, " = mul i64 ", .{}) catch unreachable;
+                try self.out.appendSlice(self.alloc, mul_str);
+                try self.writeSlot(count_slot);
+                const elem_str = std.fmt.bufPrint(&buf, ", {d}\n", .{elem_size}) catch unreachable;
+                try self.out.appendSlice(self.alloc, elem_str);
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                try self.out.appendSlice(self.alloc, " = alloca i8, i64 ");
+                try self.writeTmp(size_tmp);
+                try self.out.appendSlice(self.alloc, ", align 8\n");
+                return .{ .tmp = t };
+            },
+            .load => |ptr_reg| {
+                const ptr = env[ptr_reg];
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                try self.out.appendSlice(self.alloc, " = load i64, ptr ");
+                try self.writeSlot(ptr);
+                try self.out.append(self.alloc, '\n');
+                return .{ .tmp = t };
+            },
+            .get_field_ref => |gfr| {
+                const base = env[gfr.ptr];
+                const idx = try self.fieldOffset(gfr.field);
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                try self.out.appendSlice(self.alloc, " = getelementptr inbounds i64, ptr ");
+                try self.writeSlot(base);
+                var buf: [24]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, ", i64 {d}\n", .{idx}) catch unreachable;
+                try self.out.appendSlice(self.alloc, s);
+                return .{ .tmp = t };
+            },
+            .get_index_ref => |gir| {
+                const base = env[gir.arr];
+                const idx_slot = try self.emitExpr(gir.idx, env);
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                try self.out.appendSlice(self.alloc, " = getelementptr inbounds i64, ptr ");
+                try self.writeSlot(base);
+                try self.out.appendSlice(self.alloc, ", i64 ");
+                try self.writeSlot(idx_slot);
+                try self.out.append(self.alloc, '\n');
+                return .{ .tmp = t };
+            },
             .float_lit => |f| {
                 const t = self.fresh();
                 try self.out.appendSlice(self.alloc, "  ");
@@ -498,13 +599,17 @@ const Emitter = struct {
             \\declare i64 @read(i64, ptr, i64)
             \\declare i64 @write(i64, ptr, i64)
             \\declare i64 @close(i64)
+            \\declare void @free(ptr)
+            \\declare ptr @bear_arena_create()
+            \\declare ptr @bear_arena_alloc(ptr, i64)
+            \\declare void @bear_arena_destroy(ptr)
             \\
         );
     }
 
     fn emitDataSection(self: *Emitter) !void {
         for (self.strings.items) |e| {
-            var buf: [32]u8 = undefined;
+            var buf: [128]u8 = undefined;
             const hdr = std.fmt.bufPrint(&buf, "@.str{d} = private unnamed_addr constant [{d} x i8] c\"", .{ e.idx, e.byte_len }) catch unreachable;
             try self.out.appendSlice(self.alloc, hdr);
             for (e.content) |ch| {
