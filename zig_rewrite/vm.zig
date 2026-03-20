@@ -1089,7 +1089,6 @@ pub const Vm = struct {
                     }
                     pc += 1;
                 },
-                // Anything else shouldn't appear in a pure_int function.
                 else => return error.NotPureInt,
             }
         }
