@@ -104,13 +104,14 @@ pub fn run(program: *const lexer.Program, alloc: std.mem.Allocator) !void {
     vm.tasks = &tasks;
 
     const main_fn = vm.findFunc("main") orelse return error.NoMainFunction;
+    const main_idx = vm.func_index.get("main") orelse return error.NoMainFunction;
     const env = try alloc.alloc(Value, main_fn.n_regs);
     defer {
         for (env) |*v| v.deinit(alloc);
         alloc.free(env);
     }
     @memset(env, .void_);
-    _ = try vm.execBody(main_fn.body.items, env, vm.getLabelMap("main"));
+    _ = try vm.execBody(main_fn.body.items, env, main_idx);
 }
 
 pub const Value = union(enum) {
@@ -252,6 +253,9 @@ const CallTarget = union(enum) {
     user: u32,
 };
 
+/// Branch table entry: [true_pc, false_pc] for br_if, or [-1,-1] for non-branch stmts.
+const BrEntry = [2]i32;
+
 pub const Vm = struct {
     program: *const lexer.Program,
 
@@ -263,6 +267,16 @@ pub const Vm = struct {
 
     /// Pre-built pc-indexed jump tables for each function (pc -> target pc for jmp/br_if)
     jump_tables: [][]i32,
+
+    /// Pre-built branch tables for br_if: per-function, per-pc -> [true_pc, false_pc]
+    br_tables: [][]BrEntry,
+
+    /// Unified call target cache: name -> CallTarget (builtins + user funcs)
+    call_cache: std.StringHashMapUnmanaged(CallTarget),
+
+    /// Per-function, per-pc pre-resolved call targets (null = not a call stmt/assign-call).
+    /// Indexed as call_tables[func_idx][pc] — avoids hash lookup on every call site.
+    call_tables: [][]?CallTarget,
 
     /// File handles table
     files: std.ArrayListUnmanaged(?FileHandle),
@@ -293,22 +307,51 @@ pub const Vm = struct {
         }
 
         const jump_tables = try alloc.alloc([]i32, n);
+        const br_tables = try alloc.alloc([]BrEntry, n);
         for (program.functions.items, 0..) |*f, i| {
             const len = f.body.items.len;
             const jt = try alloc.alloc(i32, len);
             @memset(jt, -1);
+            const bt = try alloc.alloc(BrEntry, len);
+            @memset(bt, .{ -1, -1 });
             for (f.body.items, 0..) |*s, si| {
                 switch (s.*) {
                     .jmp => |target| {
                         jt[si] = @intCast(label_maps[i].get(target) orelse continue);
                     },
                     .br_if => |br| {
-                        _ = br;
+                        const t: i32 = @intCast(label_maps[i].get(br.true_label) orelse continue);
+                        const f2: i32 = @intCast(label_maps[i].get(br.false_label) orelse continue);
+                        bt[si] = .{ t, f2 };
                     },
                     else => {},
                 }
             }
             jump_tables[i] = jt;
+            br_tables[i] = bt;
+        }
+
+        var call_cache = std.StringHashMapUnmanaged(CallTarget){};
+        try call_cache.ensureTotalCapacity(alloc, @intCast(n + builtin_map.keys().len));
+        for (builtin_map.keys(), builtin_map.values()) |k, v|
+            call_cache.putAssumeCapacity(k, .{ .builtin = v });
+        for (program.functions.items, 0..) |*f, i|
+            call_cache.putAssumeCapacity(f.name, .{ .user = @intCast(i) });
+
+        const call_tables = try alloc.alloc([]?CallTarget, n);
+        for (program.functions.items, 0..) |*f, i| {
+            const ct = try alloc.alloc(?CallTarget, f.body.items.len);
+            @memset(ct, null);
+            for (f.body.items, 0..) |*s, si| {
+                switch (s.*) {
+                    .call => |c| ct[si] = call_cache.get(c.name),
+                    .assign => |a| if (a.expr.* == .call) {
+                        ct[si] = call_cache.get(a.expr.call.name);
+                    },
+                    else => {},
+                }
+            }
+            call_tables[i] = ct;
         }
 
         return .{
@@ -316,6 +359,9 @@ pub const Vm = struct {
             .func_index = func_index,
             .label_maps = label_maps,
             .jump_tables = jump_tables,
+            .br_tables = br_tables,
+            .call_cache = call_cache,
+            .call_tables = call_tables,
             .files = .empty,
             .heap_structs = .empty,
             .heap_arrays = .empty,
@@ -331,6 +377,11 @@ pub const Vm = struct {
         self.alloc.free(self.label_maps);
         for (self.jump_tables) |jt| self.alloc.free(jt);
         self.alloc.free(self.jump_tables);
+        for (self.br_tables) |bt| self.alloc.free(bt);
+        self.alloc.free(self.br_tables);
+        self.call_cache.deinit(self.alloc);
+        for (self.call_tables) |ct| self.alloc.free(ct);
+        self.alloc.free(self.call_tables);
         self.files.deinit(self.alloc);
         for (self.heap_structs.items) |hs| {
             hs.deinit(self.alloc);
@@ -712,30 +763,30 @@ pub const Vm = struct {
         if (argc > 32) return error.TooManyArguments;
         for (arg_exprs, 0..) |a, i|
             args_buf[i] = try self.evalExpr(a, env);
-        return self.callFuncWithValues(name, args_buf[0..argc]);
+        const target = self.call_cache.get(name) orelse return error.UndefinedFunction;
+        return switch (target) {
+            .builtin => |tag| self.execBuiltin(tag, args_buf[0..argc]),
+            .user => |idx| self.callFuncByIdx(idx, args_buf[0..argc]),
+        };
     }
 
     pub fn callFuncWithValues(self: *Vm, name: []const u8, args: []Value) anyerror!Value {
-        if (builtin_map.get(name)) |tag| {
-            return self.execBuiltin(tag, args);
-        }
-
-        const idx = self.func_index.get(name) orelse return error.UndefinedFunction;
-        return self.callFuncByIdx(idx, args);
+        const target = self.call_cache.get(name) orelse return error.UndefinedFunction;
+        return switch (target) {
+            .builtin => |tag| self.execBuiltin(tag, args),
+            .user => |idx| self.callFuncByIdx(idx, args),
+        };
     }
 
     /// Call a user function by its pre-resolved index. Avoids hash lookup on hot paths.
     fn callFuncByIdx(self: *Vm, idx: u32, args: []Value) anyerror!Value {
         const func = &self.program.functions.items[idx];
-        const label_map = &self.label_maps[idx];
 
         var stack_env: [64]Value = undefined;
         const new_env: []Value = if (func.n_regs <= 64) blk: {
-            @memset(stack_env[0..func.n_regs], .void_);
             break :blk stack_env[0..func.n_regs];
         } else blk: {
             const e = try self.alloc.alloc(Value, func.n_regs);
-            @memset(e, .void_);
             break :blk e;
         };
         defer if (func.n_regs > 64) {
@@ -746,7 +797,7 @@ pub const Vm = struct {
         for (func.params.items, 0..) |param, i|
             new_env[param.idx] = args[i];
 
-        return (try self.execBody(func.body.items, new_env, label_map)) orelse .void_;
+        return (try self.execBody(func.body.items, new_env, idx)) orelse .void_;
     }
 
     fn execBuiltin(self: *Vm, tag: BuiltinTag, args: []Value) anyerror!Value {
@@ -815,7 +866,15 @@ pub const Vm = struct {
         };
     }
 
-    pub fn execBody(self: *Vm, stmts: []const lexer.Stmt, env: []Value, label_map: *const LabelMap) anyerror!?Value {
+    pub fn execBody(self: *Vm, stmts: []const lexer.Stmt, env: []Value, func_idx: u32) anyerror!?Value {
+        const jump_table = self.jump_tables[func_idx];
+        const br_table = self.br_tables[func_idx];
+        const label_map = &self.label_maps[func_idx];
+        const call_table = self.call_tables[func_idx];
+        return self.execBodyWithTables(stmts, env, label_map, jump_table, br_table, call_table);
+    }
+
+    fn execBodyWithTables(self: *Vm, stmts: []const lexer.Stmt, env: []Value, label_map: *const LabelMap, jump_table: []const i32, br_table: []const BrEntry, call_table: []const ?CallTarget) anyerror!?Value {
         var pc: usize = 0;
         var prev_label: ?[]const u8 = null;
         var cur_label: ?[]const u8 = null;
@@ -823,7 +882,19 @@ pub const Vm = struct {
         while (pc < len) {
             switch (stmts[pc]) {
                 .assign => |a| {
-                    env[a.reg] = try self.evalExprWithPrev(a.expr, env, prev_label);
+                    if (call_table[pc]) |target| {
+                        const c = a.expr.call;
+                        var args_buf: [32]Value = undefined;
+                        const argc = c.args.items.len;
+                        for (c.args.items, 0..) |arg, i|
+                            args_buf[i] = try self.evalExpr(arg, env);
+                        env[a.reg] = switch (target) {
+                            .builtin => |tag| try self.execBuiltin(tag, args_buf[0..argc]),
+                            .user => |idx| try self.callFuncByIdx(idx, args_buf[0..argc]),
+                        };
+                    } else {
+                        env[a.reg] = try self.evalExprWithPrev(a.expr, env, prev_label);
+                    }
                     pc += 1;
                 },
                 .set_field => |sf| {
@@ -899,7 +970,18 @@ pub const Vm = struct {
                     pc += 1;
                 },
                 .call => |c| {
-                    _ = try self.callFunc(c.name, c.args.items, env);
+                    if (call_table[pc]) |target| {
+                        var args_buf: [32]Value = undefined;
+                        const argc = c.args.items.len;
+                        for (c.args.items, 0..) |arg, i|
+                            args_buf[i] = try self.evalExpr(arg, env);
+                        _ = switch (target) {
+                            .builtin => |tag| try self.execBuiltin(tag, args_buf[0..argc]),
+                            .user => |idx| try self.callFuncByIdx(idx, args_buf[0..argc]),
+                        };
+                    } else {
+                        _ = try self.callFunc(c.name, c.args.items, env);
+                    }
                     pc += 1;
                 },
                 .ret => |e| return try self.evalExpr(e, env),
@@ -907,6 +989,32 @@ pub const Vm = struct {
                     var body_lm = LabelMap{};
                     defer body_lm.deinit(self.alloc);
                     try buildLabelMap(&body_lm, w.body.items, self.alloc);
+
+                    const wlen = w.body.items.len;
+                    const wjt = try self.alloc.alloc(i32, wlen);
+                    defer self.alloc.free(wjt);
+                    @memset(wjt, -1);
+                    const wbt = try self.alloc.alloc(BrEntry, wlen);
+                    defer self.alloc.free(wbt);
+                    @memset(wbt, .{ -1, -1 });
+                    const wct = try self.alloc.alloc(?CallTarget, wlen);
+                    defer self.alloc.free(wct);
+                    @memset(wct, null);
+                    for (w.body.items, 0..) |*ws, wsi| {
+                        switch (ws.*) {
+                            .jmp => |t| { wjt[wsi] = @intCast(body_lm.get(t) orelse continue); },
+                            .br_if => |br2| {
+                                const t2: i32 = @intCast(body_lm.get(br2.true_label) orelse continue);
+                                const f3: i32 = @intCast(body_lm.get(br2.false_label) orelse continue);
+                                wbt[wsi] = .{ t2, f3 };
+                            },
+                            .call => |wc| wct[wsi] = self.call_cache.get(wc.name),
+                            .assign => |wa| if (wa.expr.* == .call) {
+                                wct[wsi] = self.call_cache.get(wa.expr.call.name);
+                            },
+                            else => {},
+                        }
+                    }
 
                     const body = w.body.items;
                     const cond = w.cond;
@@ -919,7 +1027,7 @@ pub const Vm = struct {
                         };
                         if (!keep) break;
 
-                        if (try self.execBody(body, env, &body_lm)) |v| return v;
+                        if (try self.execBodyWithTables(body, env, &body_lm, wjt, wbt, wct)) |v| return v;
                     }
                     pc += 1;
                 },
@@ -929,7 +1037,8 @@ pub const Vm = struct {
                 },
                 .jmp => |target| {
                     prev_label = cur_label;
-                    pc = label_map.get(target) orelse return error.UndefinedLabel;
+                    const cached = jump_table[pc];
+                    pc = if (cached >= 0) @intCast(cached) else label_map.get(target) orelse return error.UndefinedLabel;
                 },
                 .br_if => |br| {
                     const taken = switch (env[br.cond]) {
@@ -937,9 +1046,13 @@ pub const Vm = struct {
                         .int => |n| n != 0,
                         else => return error.TypeMismatch,
                     };
-                    const target = if (taken) br.true_label else br.false_label;
                     prev_label = cur_label;
-                    pc = label_map.get(target) orelse return error.UndefinedLabel;
+                    const entry = br_table[pc];
+                    if (taken) {
+                        pc = if (entry[0] >= 0) @intCast(entry[0]) else label_map.get(br.true_label) orelse return error.UndefinedLabel;
+                    } else {
+                        pc = if (entry[1] >= 0) @intCast(entry[1]) else label_map.get(br.false_label) orelse return error.UndefinedLabel;
+                    }
                 },
             }
         }

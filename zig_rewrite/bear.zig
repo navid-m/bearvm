@@ -232,13 +232,14 @@ fn evalMain(src: []const u8, alloc: std.mem.Allocator) !bear_vm.Value {
     var vm = try bear_vm.Vm.init(&prog, alloc);
     defer vm.deinit();
     const main_fn = vm.findFunc("main") orelse return error.NoMainFunction;
+    const main_idx = vm.func_index.get("main") orelse return error.NoMainFunction;
     const env = try alloc.alloc(bear_vm.Value, main_fn.n_regs);
     defer {
         for (env) |*v| v.deinit(alloc);
         alloc.free(env);
     }
     @memset(env, .void_);
-    return (try vm.execBody(main_fn.body.items, env, vm.getLabelMap("main"))) orelse .void_;
+    return (try vm.execBody(main_fn.body.items, env, main_idx)) orelse .void_;
 }
 
 test "lexer: empty input yields only eof" {
