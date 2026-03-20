@@ -18,30 +18,21 @@ pub const TaskTable = struct {
     pub fn init(alloc: std.mem.Allocator) TaskTable {
         return .{ .mutex = .{}, .tasks = .empty, .alloc = alloc };
     }
-
     pub fn deinit(self: *TaskTable) void {
         self.tasks.deinit(self.alloc);
     }
-
     pub fn reserve(self: *TaskTable) !u32 {
         self.mutex.lock();
         defer self.mutex.unlock();
         const id: u32 = @intCast(self.tasks.items.len);
-        try self.tasks.append(self.alloc, .{
-            .thread = undefined,
-            .state = .running,
-            .result = .void_,
-            .err = null,
-        });
+        try self.tasks.append(self.alloc, .{ .thread = undefined, .state = .running, .result = .void_, .err = null });
         return id;
     }
-
     pub fn setThread(self: *TaskTable, id: u32, thread: std.Thread) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.tasks.items[id].thread = thread;
     }
-
     pub fn complete(self: *TaskTable, id: u32, result: Value, err: ?anyerror) void {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -49,7 +40,6 @@ pub const TaskTable = struct {
         self.tasks.items[id].err = err;
         self.tasks.items[id].state = .done;
     }
-
     pub fn join(self: *TaskTable, id: u32) !Value {
         self.mutex.lock();
         const thread = self.tasks.items[id].thread;
@@ -76,7 +66,6 @@ fn spawnEntry(sa: *SpawnArgs) void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-
     defer sa.alloc.destroy(sa);
     var vm = Vm.init(sa.program, alloc) catch |e| {
         sa.tasks.complete(sa.task_id, .void_, e);
@@ -85,7 +74,6 @@ fn spawnEntry(sa: *SpawnArgs) void {
     };
     defer vm.deinit();
     vm.tasks = sa.tasks;
-
     const result = vm.callFuncWithValues(sa.func_name, sa.args) catch |e| {
         sa.tasks.complete(sa.task_id, .void_, e);
         sa.alloc.free(sa.args);
@@ -98,55 +86,24 @@ fn spawnEntry(sa: *SpawnArgs) void {
 pub fn run(program: *const lexer.Program, alloc: std.mem.Allocator) !void {
     var tasks = TaskTable.init(alloc);
     defer tasks.deinit();
-
     var vm = try Vm.init(program, alloc);
     defer vm.deinit();
     vm.tasks = &tasks;
-
-    const main_fn = vm.findFunc("main") orelse return error.NoMainFunction;
     const main_idx = vm.func_index.get("main") orelse return error.NoMainFunction;
-    const env = try alloc.alloc(Value, main_fn.n_regs);
-    defer {
-        for (env) |*v| v.deinit(alloc);
-        alloc.free(env);
-    }
-    @memset(env, .void_);
-    _ = try vm.execBody(main_fn.body.items, env, main_idx);
+    _ = try vm.callFuncByIdx(main_idx, &.{});
 }
 
 pub const Value = union(enum) {
-    /// An integer value.
     int: i64,
-
-    /// Float (single precision stored as f64 for simplicity)
     float_: f64,
-
-    /// Double precision float
     double_: f64,
-
-    /// Raw string value.
     str: []const u8,
-
-    /// Boolean bit.
     bool_: bool,
-
-    /// Heap-allocated raw buffer — owned by the VM, freed on deinit/free.
     ptr: []u8,
-
-    /// Arena-allocated raw buffer — owned by a BearArena, NOT freed individually.
     arena_ptr: []u8,
-
-    /// A typed pointer — references a heap-allocated Value cell.
-    /// Used by get_field_ref / get_index_ref / alloc_type / alloc_array.
     ref: *HeapCell,
-
-    /// File handle.
     file: i64,
-
-    /// Nothing.
     void_,
-
-    /// Structure value.
     struct_: StructVal,
 
     pub fn deinit(self: *Value, alloc: std.mem.Allocator) void {
@@ -160,13 +117,9 @@ pub const Value = union(enum) {
             else => {},
         }
     }
-
-    /// Fast integer extraction — avoids a branch when we know it's int.
     pub inline fn asInt(self: Value) i64 {
         return self.int;
     }
-
-    /// Fast bool extraction.
     pub inline fn asBool(self: Value) bool {
         return switch (self) {
             .bool_ => |b| b,
@@ -174,123 +127,559 @@ pub const Value = union(enum) {
             else => unreachable,
         };
     }
-
-    /// Fast integer check
     pub inline fn isInt(self: Value) bool {
         return self == .int;
     }
 };
 
-/// A single heap-allocated value cell, used as the target of a `ref`.
-/// Owned by a HeapStruct or HeapArray; the ref just borrows a pointer.
-pub const HeapCell = struct {
-    value: Value,
-};
-
-/// Heap-allocated struct — fields are HeapCells so we can take refs into them.
+pub const HeapCell = struct { value: Value };
 pub const HeapStruct = struct {
     name: []const u8,
     fields: std.StringArrayHashMap(HeapCell),
-
     pub fn deinit(self: *HeapStruct, alloc: std.mem.Allocator) void {
         var it = self.fields.iterator();
         while (it.next()) |entry| entry.value_ptr.value.deinit(alloc);
         self.fields.deinit();
     }
 };
-
-/// Heap-allocated array — elements are HeapCells so we can take refs into them.
 pub const HeapArray = struct {
     cells: []HeapCell,
     alloc: std.mem.Allocator,
-
     pub fn deinit(self: *HeapArray) void {
         for (self.cells) |*c| c.value.deinit(self.alloc);
         self.alloc.free(self.cells);
     }
 };
-
-/// Arena allocator — all allocations freed at once on arena_destroy.
 pub const BearArena = struct {
     inner: std.heap.ArenaAllocator,
-
     pub fn init(backing: std.mem.Allocator) BearArena {
         return .{ .inner = std.heap.ArenaAllocator.init(backing) };
     }
-
     pub fn allocator(self: *BearArena) std.mem.Allocator {
         return self.inner.allocator();
     }
-
     pub fn deinit(self: *BearArena) void {
         self.inner.deinit();
     }
 };
 
-const StructVal = struct {
-    name: []const u8,
-    fields: std.StringArrayHashMap(Value),
-};
-
-const FileHandle = union(enum) { read: std.fs.File, write: std.fs.File };
+const StructVal = struct { name: []const u8, fields: std.StringArrayHashMap(Value) };
 const BuiltinTag = enum(u8) { puts, open, read, write, close, flush, putf };
+
 const builtin_map = std.StaticStringMap(BuiltinTag).initComptime(.{
-    .{ "puts", .puts },
-    .{ "open", .open },
-    .{ "read", .read },
-    .{ "write", .write },
-    .{ "close", .close },
-    .{ "flush", .flush },
+    .{ "puts", .puts },   .{ "open", .open },   .{ "read", .read },
+    .{ "write", .write }, .{ "close", .close }, .{ "flush", .flush },
     .{ "putf", .putf },
 });
+const FileHandle = union(enum) { read: std.fs.File, write: std.fs.File };
+const CallTarget = union(enum) { builtin: BuiltinTag, user: u32 };
 
-/// Pre-built label map for a function body (label name -> statement index).
-const LabelMap = std.StringHashMapUnmanaged(usize);
-
-/// Resolved call target — cached at parse time to avoid repeated hash lookups.
-const CallTarget = union(enum) {
-    builtin: BuiltinTag,
-    user: u32,
+pub const Op = enum(u8) {
+    load_int,
+    load_str,
+    load_float,
+    move,
+    load_named,
+    add,
+    sub,
+    mul,
+    div,
+    lt,
+    gt,
+    le,
+    ge,
+    eq_val,
+    jmp,
+    br_if,
+    ret,
+    ret_void,
+    set_label,
+    phi,
+    call_user,
+    call_builtin,
+    call_user_void,
+    call_builtin_void,
+    alloc_bytes,
+    alloc_type,
+    alloc_array,
+    load_ref,
+    store_ref,
+    get_field_ref,
+    get_index_ref,
+    free_reg,
+    arena_create,
+    arena_alloc,
+    arena_destroy,
+    struct_lit,
+    set_field,
+    get_field,
+    spawn,
+    sync_task,
+    cast,
 };
 
-/// Branch table entry: [true_pc, false_pc] for br_if, or [-1,-1] for non-branch stmts.
-const BrEntry = [2]i32;
+pub const Instr = packed struct {
+    op: Op,
+    flag: u8,
+    dst: u16,
+    a: u16,
+    b: u16,
+};
+
+pub const ArgRange = struct { start: u32, len: u16 };
+pub const PhiEntry = struct { pred_label_idx: u16, src_reg: u16 };
+
+pub const CompiledFn = struct {
+    n_regs: u16,
+    code: []Instr,
+    int_pool: []i64,
+    float_pool: []f64,
+    str_pool: [][]const u8,
+    arg_regs: []u16,
+    arg_ranges: []ArgRange,
+    phi_tables: [][]PhiEntry,
+
+    pub fn deinit(self: *CompiledFn, alloc: std.mem.Allocator) void {
+        alloc.free(self.code);
+        alloc.free(self.int_pool);
+        alloc.free(self.float_pool);
+        alloc.free(self.str_pool);
+        alloc.free(self.arg_regs);
+        alloc.free(self.arg_ranges);
+        for (self.phi_tables) |pt| alloc.free(pt);
+        alloc.free(self.phi_tables);
+    }
+};
+
+const CALL_STACK_SLOTS: usize = 1 << 20;
+
+const CallStack = struct {
+    buf: []Value,
+    top: usize,
+    fn init(alloc: std.mem.Allocator) !CallStack {
+        return .{ .buf = try alloc.alloc(Value, CALL_STACK_SLOTS), .top = 0 };
+    }
+    fn deinit(self: *CallStack, alloc: std.mem.Allocator) void {
+        alloc.free(self.buf);
+    }
+    inline fn push(self: *CallStack, n: usize) ![]Value {
+        const s = self.top;
+        const e = s + n;
+        if (e > self.buf.len) return error.CallStackOverflow;
+        self.top = e;
+        return self.buf[s..e];
+    }
+    inline fn pop(self: *CallStack, n: usize) void {
+        self.top -= n;
+    }
+};
+
+const Compiler = struct {
+    alloc: std.mem.Allocator,
+    code: std.ArrayListUnmanaged(Instr),
+    int_pool: std.ArrayListUnmanaged(i64),
+    float_pool: std.ArrayListUnmanaged(f64),
+    str_pool: std.ArrayListUnmanaged([]const u8),
+    arg_regs: std.ArrayListUnmanaged(u16),
+    arg_ranges: std.ArrayListUnmanaged(ArgRange),
+    phi_tables: std.ArrayListUnmanaged([]PhiEntry),
+    label_pcs: std.StringHashMapUnmanaged(u32),
+    label_idx: std.StringHashMapUnmanaged(u16),
+    patches: std.ArrayListUnmanaged(Patch),
+    call_cache: *const std.StringHashMapUnmanaged(CallTarget),
+
+    const Patch = struct { pc: u32, field: enum { a, b }, label: []const u8 };
+
+    fn init(alloc: std.mem.Allocator, cc: *const std.StringHashMapUnmanaged(CallTarget)) Compiler {
+        return .{
+            .alloc = alloc,
+            .code = .empty,
+            .int_pool = .empty,
+            .float_pool = .empty,
+            .str_pool = .empty,
+            .arg_regs = .empty,
+            .arg_ranges = .empty,
+            .phi_tables = .empty,
+            .label_pcs = .{},
+            .label_idx = .{},
+            .patches = .empty,
+            .call_cache = cc,
+        };
+    }
+    fn deinit(self: *Compiler) void {
+        self.code.deinit(self.alloc);
+        self.int_pool.deinit(self.alloc);
+        self.float_pool.deinit(self.alloc);
+        self.str_pool.deinit(self.alloc);
+        self.arg_regs.deinit(self.alloc);
+        self.arg_ranges.deinit(self.alloc);
+        for (self.phi_tables.items) |pt| self.alloc.free(pt);
+        self.phi_tables.deinit(self.alloc);
+        self.label_pcs.deinit(self.alloc);
+        self.label_idx.deinit(self.alloc);
+        self.patches.deinit(self.alloc);
+    }
+
+    fn intIdx(self: *Compiler, n: i64) !u16 {
+        for (self.int_pool.items, 0..) |v, i| if (v == n) return @intCast(i);
+        const idx: u16 = @intCast(self.int_pool.items.len);
+        try self.int_pool.append(self.alloc, n);
+        return idx;
+    }
+    fn floatIdx(self: *Compiler, f: f64) !u16 {
+        const idx: u16 = @intCast(self.float_pool.items.len);
+        try self.float_pool.append(self.alloc, f);
+        return idx;
+    }
+    fn strIdx(self: *Compiler, s: []const u8) !u16 {
+        for (self.str_pool.items, 0..) |v, i| if (std.mem.eql(u8, v, s)) return @intCast(i);
+        const idx: u16 = @intCast(self.str_pool.items.len);
+        try self.str_pool.append(self.alloc, s);
+        return idx;
+    }
+
+    fn emit(self: *Compiler, ins: Instr) !u32 {
+        const pc: u32 = @intCast(self.code.items.len);
+        try self.code.append(self.alloc, ins);
+        return pc;
+    }
+
+    fn compileExpr(self: *Compiler, expr: *const lexer.Expr, scratch: u16) anyerror!u16 {
+        switch (expr.*) {
+            .reg => |r| return r,
+            .const_ => |inner| return self.compileExpr(inner, scratch),
+
+            .int => |n| {
+                const idx = try self.intIdx(n);
+                _ = try self.emit(.{ .op = .load_int, .flag = 0, .dst = scratch, .a = idx, .b = 0 });
+                return scratch;
+            },
+            .float_lit => |f| {
+                const idx = try self.floatIdx(f);
+                _ = try self.emit(.{ .op = .load_float, .flag = 0, .dst = scratch, .a = idx, .b = 0 });
+                return scratch;
+            },
+            .str => |s| {
+                const idx = try self.strIdx(s);
+                _ = try self.emit(.{ .op = .load_str, .flag = 0, .dst = scratch, .a = idx, .b = 0 });
+                return scratch;
+            },
+            .named => |name| {
+                const idx = try self.strIdx(name);
+                _ = try self.emit(.{ .op = .load_named, .flag = 0, .dst = scratch, .a = idx, .b = 0 });
+                return scratch;
+            },
+
+            .add, .sub, .mul, .div, .lt, .gt, .le, .ge => return self.compileBinOp(expr, scratch),
+
+            .eq => |op| {
+                const ra = try self.compileExpr(op.a, scratch);
+                const rb = try self.compileExpr(op.b, if (ra == scratch) scratch +% 1 else scratch);
+                _ = try self.emit(.{ .op = .eq_val, .flag = 0, .dst = scratch, .a = ra, .b = rb });
+                return scratch;
+            },
+
+            .call => |c| {
+                const ar_idx = try self.buildArgRange(c.args.items, scratch);
+                const target = self.call_cache.get(c.name) orelse return error.UndefinedFunction;
+                switch (target) {
+                    .builtin => |tag| _ = try self.emit(.{ .op = .call_builtin, .flag = 0, .dst = scratch, .a = @intFromEnum(tag), .b = ar_idx }),
+                    .user => |idx| _ = try self.emit(.{ .op = .call_user, .flag = 0, .dst = scratch, .a = @intCast(idx), .b = ar_idx }),
+                }
+                return scratch;
+            },
+
+            .field => |f| {
+                const idx = try self.strIdx(f.field);
+                _ = try self.emit(.{ .op = .get_field, .flag = 0, .dst = scratch, .a = f.reg, .b = idx });
+                return scratch;
+            },
+
+            .alloc => |size_expr| {
+                const ra = try self.compileExpr(size_expr, scratch);
+                _ = try self.emit(.{ .op = .alloc_bytes, .flag = 0, .dst = scratch, .a = ra, .b = 0 });
+                return scratch;
+            },
+            .alloc_type => |name| {
+                const idx = try self.strIdx(name);
+                _ = try self.emit(.{ .op = .alloc_type, .flag = 0, .dst = scratch, .a = idx, .b = 0 });
+                return scratch;
+            },
+            .alloc_array => |aa| {
+                const ra = try self.compileExpr(aa.count, scratch);
+                _ = try self.emit(.{ .op = .alloc_array, .flag = @intFromEnum(aa.elem_ty), .dst = scratch, .a = ra, .b = 0 });
+                return scratch;
+            },
+            .load => |ptr_reg| {
+                _ = try self.emit(.{ .op = .load_ref, .flag = 0, .dst = scratch, .a = ptr_reg, .b = 0 });
+                return scratch;
+            },
+            .get_field_ref => |gfr| {
+                const idx = try self.strIdx(gfr.field);
+                _ = try self.emit(.{ .op = .get_field_ref, .flag = 0, .dst = scratch, .a = gfr.ptr, .b = idx });
+                return scratch;
+            },
+            .get_index_ref => |gir| {
+                const rb = try self.compileExpr(gir.idx, scratch +% 1);
+                _ = try self.emit(.{ .op = .get_index_ref, .flag = 0, .dst = scratch, .a = gir.arr, .b = rb });
+                return scratch;
+            },
+            .struct_lit => |sl| {
+                const name_idx = try self.strIdx(sl.name);
+                const ar_start: u32 = @intCast(self.arg_regs.items.len);
+                for (sl.fields.items, 0..) |fi, i| {
+                    const fn_idx = try self.strIdx(fi.name);
+                    const r = try self.compileExpr(fi.expr, scratch +% 1 +% @as(u16, @intCast(i)));
+                    try self.arg_regs.append(self.alloc, fn_idx);
+                    try self.arg_regs.append(self.alloc, r);
+                }
+                const ar_idx: u16 = @intCast(self.arg_ranges.items.len);
+                try self.arg_ranges.append(self.alloc, .{ .start = ar_start, .len = @intCast(sl.fields.items.len) });
+                _ = try self.emit(.{ .op = .struct_lit, .flag = 0, .dst = scratch, .a = name_idx, .b = ar_idx });
+                return scratch;
+            },
+            .arena_create => {
+                _ = try self.emit(.{ .op = .arena_create, .flag = 0, .dst = scratch, .a = 0, .b = 0 });
+                return scratch;
+            },
+            .arena_alloc => |aa| {
+                const rs = try self.compileExpr(aa.size, scratch +% 1);
+                _ = try self.emit(.{ .op = .arena_alloc, .flag = 0, .dst = scratch, .a = aa.arena, .b = rs });
+                return scratch;
+            },
+            .phi => |arms| {
+                var entries = try self.alloc.alloc(PhiEntry, arms.items.len);
+                for (arms.items, 0..) |arm, i| {
+                    const pred_idx = self.label_idx.get(arm.label) orelse 0;
+                    entries[i] = .{ .pred_label_idx = @intCast(pred_idx), .src_reg = arm.reg };
+                }
+                const pt_idx: u16 = @intCast(self.phi_tables.items.len);
+                try self.phi_tables.append(self.alloc, entries);
+                _ = try self.emit(.{ .op = .phi, .flag = 0, .dst = scratch, .a = pt_idx, .b = 0 });
+                return scratch;
+            },
+            .spawn => |s| {
+                const ar_idx = try self.buildArgRange(s.args.items, scratch);
+                const name_idx = try self.strIdx(s.name);
+                _ = try self.emit(.{ .op = .spawn, .flag = 0, .dst = scratch, .a = name_idx, .b = ar_idx });
+                return scratch;
+            },
+            .sync => |reg| {
+                _ = try self.emit(.{ .op = .sync_task, .flag = 0, .dst = scratch, .a = reg, .b = 0 });
+                return scratch;
+            },
+            .free => |ptr_reg| {
+                _ = try self.emit(.{ .op = .free_reg, .flag = 0, .dst = ptr_reg, .a = 0, .b = 0 });
+                return scratch;
+            },
+            .cast => |c| {
+                const ra = try self.compileExpr(c.expr, scratch);
+                _ = try self.emit(.{ .op = .cast, .flag = @intFromEnum(c.ty), .dst = scratch, .a = ra, .b = 0 });
+                return scratch;
+            },
+        }
+    }
+
+    /// Binary ops with optional immediate inlining for integer literals.
+    fn compileBinOp(self: *Compiler, expr: *const lexer.Expr, dst: u16) !u16 {
+        const op_tag: Op, const bop: lexer.BinOp = switch (expr.*) {
+            .add => |b| .{ .add, b },
+            .sub => |b| .{ .sub, b },
+            .mul => |b| .{ .mul, b },
+            .div => |b| .{ .div, b },
+            .lt => |b| .{ .lt, b },
+            .gt => |b| .{ .gt, b },
+            .le => |b| .{ .le, b },
+            .ge => |b| .{ .ge, b },
+            else => unreachable,
+        };
+
+        const ae = if (bop.a.* == .const_) bop.a.const_ else bop.a;
+        const be = if (bop.b.* == .const_) bop.b.const_ else bop.b;
+
+        var flag: u8 = 0;
+        var a_val: u16 = undefined;
+        var b_val: u16 = undefined;
+
+        if (ae.* == .int) {
+            a_val = try self.intIdx(ae.int);
+            flag |= 0x01;
+        } else if (ae.* == .reg) {
+            a_val = ae.reg;
+        } else {
+            a_val = try self.compileExpr(bop.a, dst);
+        }
+
+        if (be.* == .int) {
+            b_val = try self.intIdx(be.int);
+            flag |= 0x02;
+        } else if (be.* == .reg) {
+            b_val = be.reg;
+        } else {
+            const scratch_b: u16 = if ((flag & 0x01 == 0) and a_val == dst) dst +% 1 else dst;
+            b_val = try self.compileExpr(bop.b, scratch_b);
+        }
+
+        _ = try self.emit(.{ .op = op_tag, .flag = flag, .dst = dst, .a = a_val, .b = b_val });
+        return dst;
+    }
+
+    /// Build arg list and push an ArgRange; returns the arg_range index as u16.
+    fn buildArgRange(self: *Compiler, arg_exprs: []*lexer.Expr, base_scratch: u16) !u16 {
+        const ar_start: u32 = @intCast(self.arg_regs.items.len);
+        for (arg_exprs, 0..) |ae, i| {
+            const r = try self.compileExpr(ae, base_scratch +% @as(u16, @intCast(i)));
+            try self.arg_regs.append(self.alloc, r);
+        }
+        const ar_idx: u16 = @intCast(self.arg_ranges.items.len);
+        try self.arg_ranges.append(self.alloc, .{ .start = ar_start, .len = @intCast(arg_exprs.len) });
+        return ar_idx;
+    }
+
+    fn compileStmts(self: *Compiler, stmts: []const lexer.Stmt) !void {
+        for (stmts) |*s| try self.compileStmt(s);
+    }
+
+    fn compileStmt(self: *Compiler, s: *const lexer.Stmt) anyerror!void {
+        switch (s.*) {
+            .label => |name| {
+                const pc: u32 = @intCast(self.code.items.len);
+                try self.label_pcs.put(self.alloc, name, pc);
+                const idx = self.label_idx.get(name) orelse 0;
+                _ = try self.emit(.{ .op = .set_label, .flag = 0, .dst = idx, .a = 0, .b = 0 });
+            },
+
+            .assign => |a| {
+                const r = try self.compileExpr(a.expr, a.reg);
+                if (r != a.reg)
+                    _ = try self.emit(.{ .op = .move, .flag = 0, .dst = a.reg, .a = r, .b = 0 });
+            },
+
+            .set_field => |sf| {
+                const field_idx = try self.strIdx(sf.field);
+                const r = try self.compileExpr(sf.expr, sf.reg +% 1);
+                _ = try self.emit(.{ .op = .set_field, .flag = 0, .dst = sf.reg, .a = field_idx, .b = r });
+            },
+
+            .store => |st| {
+                const r = try self.compileExpr(st.expr, st.ptr +% 1);
+                _ = try self.emit(.{ .op = .store_ref, .flag = 0, .dst = st.ptr, .a = r, .b = 0 });
+            },
+
+            .free => |ptr_reg| {
+                _ = try self.emit(.{ .op = .free_reg, .flag = 0, .dst = ptr_reg, .a = 0, .b = 0 });
+            },
+
+            .arena_destroy => |arena_reg| {
+                _ = try self.emit(.{ .op = .arena_destroy, .flag = 0, .dst = arena_reg, .a = 0, .b = 0 });
+            },
+
+            .call => |c| {
+                const ar_idx = try self.buildArgRange(c.args.items, 1);
+                const target = self.call_cache.get(c.name) orelse return error.UndefinedFunction;
+                switch (target) {
+                    .builtin => |tag| _ = try self.emit(.{ .op = .call_builtin_void, .flag = 0, .dst = 0, .a = @intFromEnum(tag), .b = ar_idx }),
+                    .user => |idx| _ = try self.emit(.{ .op = .call_user_void, .flag = 0, .dst = 0, .a = @intCast(idx), .b = ar_idx }),
+                }
+            },
+
+            .ret => |e| {
+                const r = try self.compileExpr(e, 0);
+                _ = try self.emit(.{ .op = .ret, .flag = 0, .dst = r, .a = 0, .b = 0 });
+            },
+
+            .jmp => |target| {
+                const patch_pc: u32 = @intCast(self.code.items.len);
+                _ = try self.emit(.{ .op = .jmp, .flag = 0, .dst = 0, .a = 0, .b = 0 });
+                try self.patches.append(self.alloc, .{ .pc = patch_pc, .field = .a, .label = target });
+            },
+
+            .br_if => |br| {
+                const patch_pc: u32 = @intCast(self.code.items.len);
+                _ = try self.emit(.{ .op = .br_if, .flag = 0, .dst = br.cond, .a = 0, .b = 0 });
+                try self.patches.append(self.alloc, .{ .pc = patch_pc, .field = .a, .label = br.true_label });
+                try self.patches.append(self.alloc, .{ .pc = patch_pc, .field = .b, .label = br.false_label });
+            },
+
+            .while_ => |*w| {
+                const cond_pc: u32 = @intCast(self.code.items.len);
+                const cond_r = try self.compileExpr(w.cond, 0);
+                const br_pc: u32 = @intCast(self.code.items.len);
+                _ = try self.emit(.{ .op = .br_if, .flag = 0, .dst = cond_r, .a = 0, .b = 0 });
+                try self.compileStmts(w.body.items);
+                _ = try self.emit(.{ .op = .jmp, .flag = 0, .dst = 0, .a = @intCast(cond_pc), .b = 0 });
+                const after_pc: u32 = @intCast(self.code.items.len);
+                self.code.items[br_pc].a = @intCast(br_pc + 1);
+                self.code.items[br_pc].b = @intCast(after_pc);
+            },
+        }
+    }
+
+    fn applyPatches(self: *Compiler) !void {
+        for (self.patches.items) |p| {
+            const tpc = self.label_pcs.get(p.label) orelse return error.UndefinedLabel;
+            switch (p.field) {
+                .a => self.code.items[p.pc].a = @intCast(tpc),
+                .b => self.code.items[p.pc].b = @intCast(tpc),
+            }
+        }
+    }
+
+    fn finish(self: *Compiler, n_regs: u16) !CompiledFn {
+        return .{
+            .n_regs = n_regs,
+            .code = try self.code.toOwnedSlice(self.alloc),
+            .int_pool = try self.int_pool.toOwnedSlice(self.alloc),
+            .float_pool = try self.float_pool.toOwnedSlice(self.alloc),
+            .str_pool = try self.str_pool.toOwnedSlice(self.alloc),
+            .arg_regs = try self.arg_regs.toOwnedSlice(self.alloc),
+            .arg_ranges = try self.arg_ranges.toOwnedSlice(self.alloc),
+            .phi_tables = try self.phi_tables.toOwnedSlice(self.alloc),
+        };
+    }
+};
+
+fn compileFunction(
+    func: *const lexer.Function,
+    call_cache: *const std.StringHashMapUnmanaged(CallTarget),
+    alloc: std.mem.Allocator,
+) !CompiledFn {
+    var c = Compiler.init(alloc, call_cache);
+    defer c.deinit();
+
+    var label_counter: u16 = 0;
+    for (func.body.items) |*st| {
+        if (st.* == .label) {
+            try c.label_idx.put(alloc, st.label, label_counter);
+            label_counter += 1;
+        }
+    }
+
+    try c.compileStmts(func.body.items);
+
+    if (c.code.items.len == 0 or
+        (c.code.items[c.code.items.len - 1].op != .ret and
+            c.code.items[c.code.items.len - 1].op != .ret_void))
+    {
+        _ = try c.emit(.{ .op = .ret_void, .flag = 0, .dst = 0, .a = 0, .b = 0 });
+    }
+
+    try c.applyPatches();
+    return c.finish(func.n_regs);
+}
 
 pub const Vm = struct {
     program: *const lexer.Program,
-
-    /// Maps function name -> index in program.functions
     func_index: std.StringHashMapUnmanaged(u32),
-
-    /// Pre-built label maps for each function (indexed same as func_index values)
-    label_maps: []LabelMap,
-
-    /// Pre-built pc-indexed jump tables for each function (pc -> target pc for jmp/br_if)
-    jump_tables: [][]i32,
-
-    /// Pre-built branch tables for br_if: per-function, per-pc -> [true_pc, false_pc]
-    br_tables: [][]BrEntry,
-
-    /// Unified call target cache: name -> CallTarget (builtins + user funcs)
     call_cache: std.StringHashMapUnmanaged(CallTarget),
-
-    /// Per-function, per-pc pre-resolved call targets (null = not a call stmt/assign-call).
-    /// Indexed as call_tables[func_idx][pc] — avoids hash lookup on every call site.
-    call_tables: [][]?CallTarget,
-
-    /// File handles table
+    compiled: []CompiledFn,
     files: std.ArrayListUnmanaged(?FileHandle),
-
-    /// Heap-allocated structs (owned here, freed on deinit)
     heap_structs: std.ArrayListUnmanaged(*HeapStruct),
-
-    /// Heap-allocated arrays (owned here, freed on deinit)
     heap_arrays: std.ArrayListUnmanaged(*HeapArray),
-
-    /// Arenas (owned here, freed on deinit or arena_destroy)
     arenas: std.ArrayListUnmanaged(?*BearArena),
     alloc: std.mem.Allocator,
     tasks: ?*TaskTable,
+    call_stack: CallStack,
 
     pub fn init(program: *const lexer.Program, alloc: std.mem.Allocator) !Vm {
         const n = program.functions.items.len;
@@ -300,37 +689,6 @@ pub const Vm = struct {
         for (program.functions.items, 0..) |*f, i|
             func_index.putAssumeCapacity(f.name, @intCast(i));
 
-        const label_maps = try alloc.alloc(LabelMap, n);
-        for (label_maps) |*lm| lm.* = .{};
-        for (program.functions.items, 0..) |*f, i| {
-            try buildLabelMap(&label_maps[i], f.body.items, alloc);
-        }
-
-        const jump_tables = try alloc.alloc([]i32, n);
-        const br_tables = try alloc.alloc([]BrEntry, n);
-        for (program.functions.items, 0..) |*f, i| {
-            const len = f.body.items.len;
-            const jt = try alloc.alloc(i32, len);
-            @memset(jt, -1);
-            const bt = try alloc.alloc(BrEntry, len);
-            @memset(bt, .{ -1, -1 });
-            for (f.body.items, 0..) |*s, si| {
-                switch (s.*) {
-                    .jmp => |target| {
-                        jt[si] = @intCast(label_maps[i].get(target) orelse continue);
-                    },
-                    .br_if => |br| {
-                        const t: i32 = @intCast(label_maps[i].get(br.true_label) orelse continue);
-                        const f2: i32 = @intCast(label_maps[i].get(br.false_label) orelse continue);
-                        bt[si] = .{ t, f2 };
-                    },
-                    else => {},
-                }
-            }
-            jump_tables[i] = jt;
-            br_tables[i] = bt;
-        }
-
         var call_cache = std.StringHashMapUnmanaged(CallTarget){};
         try call_cache.ensureTotalCapacity(alloc, @intCast(n + builtin_map.keys().len));
         for (builtin_map.keys(), builtin_map.values()) |k, v|
@@ -338,50 +696,30 @@ pub const Vm = struct {
         for (program.functions.items, 0..) |*f, i|
             call_cache.putAssumeCapacity(f.name, .{ .user = @intCast(i) });
 
-        const call_tables = try alloc.alloc([]?CallTarget, n);
-        for (program.functions.items, 0..) |*f, i| {
-            const ct = try alloc.alloc(?CallTarget, f.body.items.len);
-            @memset(ct, null);
-            for (f.body.items, 0..) |*s, si| {
-                switch (s.*) {
-                    .call => |c| ct[si] = call_cache.get(c.name),
-                    .assign => |a| if (a.expr.* == .call) {
-                        ct[si] = call_cache.get(a.expr.call.name);
-                    },
-                    else => {},
-                }
-            }
-            call_tables[i] = ct;
-        }
+        const compiled = try alloc.alloc(CompiledFn, n);
+        for (program.functions.items, 0..) |*f, i|
+            compiled[i] = try compileFunction(f, &call_cache, alloc);
 
         return .{
             .program = program,
             .func_index = func_index,
-            .label_maps = label_maps,
-            .jump_tables = jump_tables,
-            .br_tables = br_tables,
             .call_cache = call_cache,
-            .call_tables = call_tables,
+            .compiled = compiled,
             .files = .empty,
             .heap_structs = .empty,
             .heap_arrays = .empty,
             .arenas = .empty,
             .alloc = alloc,
             .tasks = null,
+            .call_stack = try CallStack.init(alloc),
         };
     }
 
     pub fn deinit(self: *Vm) void {
         self.func_index.deinit(self.alloc);
-        for (self.label_maps) |*lm| lm.deinit(self.alloc);
-        self.alloc.free(self.label_maps);
-        for (self.jump_tables) |jt| self.alloc.free(jt);
-        self.alloc.free(self.jump_tables);
-        for (self.br_tables) |bt| self.alloc.free(bt);
-        self.alloc.free(self.br_tables);
         self.call_cache.deinit(self.alloc);
-        for (self.call_tables) |ct| self.alloc.free(ct);
-        self.alloc.free(self.call_tables);
+        for (self.compiled) |*cf| cf.deinit(self.alloc);
+        self.alloc.free(self.compiled);
         self.files.deinit(self.alloc);
         for (self.heap_structs.items) |hs| {
             hs.deinit(self.alloc);
@@ -393,13 +731,14 @@ pub const Vm = struct {
             self.alloc.destroy(ha);
         }
         self.heap_arrays.deinit(self.alloc);
-        for (self.arenas.items) |maybe_arena| {
-            if (maybe_arena) |arena| {
-                arena.deinit();
-                self.alloc.destroy(arena);
+        for (self.arenas.items) |maybe| {
+            if (maybe) |a| {
+                a.deinit();
+                self.alloc.destroy(a);
             }
         }
         self.arenas.deinit(self.alloc);
+        self.call_stack.deinit(self.alloc);
     }
 
     pub fn findFunc(self: *Vm, name: []const u8) ?*const lexer.Function {
@@ -407,140 +746,213 @@ pub const Vm = struct {
         return &self.program.functions.items[idx];
     }
 
-    pub fn getLabelMap(self: *Vm, name: []const u8) *const LabelMap {
-        const idx = self.func_index.get(name) orelse unreachable;
-        return &self.label_maps[idx];
-    }
-
     fn allocFile(self: *Vm, handle: FileHandle) !i64 {
-        for (self.files.items, 0..) |slot, i| {
+        for (self.files.items, 0..) |slot, i|
             if (slot == null) {
                 self.files.items[i] = handle;
                 return @intCast(i);
-            }
-        }
+            };
         try self.files.append(self.alloc, handle);
         return @intCast(self.files.items.len - 1);
     }
 
-    /// Evaluate an expression with predecessor label context (needed for phi).
-    fn evalExprWithPrev(self: *Vm, expr: *const lexer.Expr, env: []Value, prev_label: ?[]const u8) anyerror!Value {
-        if (expr.* == .phi) {
-            const arms = expr.phi;
-            const from = prev_label orelse return error.PhiWithNoPredecessor;
-            for (arms.items) |arm| {
-                if (std.mem.eql(u8, arm.label, from)) return env[arm.reg];
-            }
-            return error.PhiNoMatchingArm;
-        }
-        return self.evalExpr(expr, env);
+    pub fn callFuncWithValues(self: *Vm, name: []const u8, args: []Value) anyerror!Value {
+        const target = self.call_cache.get(name) orelse return error.UndefinedFunction;
+        return switch (target) {
+            .builtin => |tag| self.execBuiltin(tag, args),
+            .user => |idx| self.callFuncByIdx(idx, args),
+        };
     }
 
-    /// Evaluate an expression. Hot path — keep it tight.
-    fn evalExpr(self: *Vm, expr: *const lexer.Expr, env: []Value) anyerror!Value {
-        var cur = expr;
+    pub fn callFuncByIdx(self: *Vm, idx: u32, args: []Value) anyerror!Value {
+        const cf = &self.compiled[idx];
+        const func = &self.program.functions.items[idx];
+        const n = cf.n_regs;
+
+        var used_slab = true;
+        const env = self.call_stack.push(n) catch blk: {
+            used_slab = false;
+            break :blk try self.alloc.alloc(Value, n);
+        };
+        defer {
+            if (used_slab) self.call_stack.pop(n) else {
+                for (env) |*v| v.deinit(self.alloc);
+                self.alloc.free(env);
+            }
+        }
+
+        for (func.params.items, 0..) |param, i|
+            env[param.idx] = args[i];
+
+        return self.execCompiled(cf, env);
+    }
+
+    fn execCompiled(self: *Vm, cf: *const CompiledFn, env: []Value) anyerror!Value {
+        const code = cf.code;
+        const int_pool = cf.int_pool;
+        const float_pool = cf.float_pool;
+        const str_pool = cf.str_pool;
+        const arg_regs = cf.arg_regs;
+        const arg_ranges = cf.arg_ranges;
+        const phi_tables = cf.phi_tables;
+
+        var pc: usize = 0;
+        var cur_label_idx: u16 = std.math.maxInt(u16);
+        var prev_label_idx: u16 = std.math.maxInt(u16);
+
         while (true) {
-            switch (cur.*) {
-                .int => |n| return .{ .int = n },
-                .str => |s| return .{ .str = s },
-                .reg => |r| return env[r],
-                .field => |f| return switch (env[f.reg]) {
-                    .struct_ => |sv| sv.fields.get(f.field) orelse return error.NoSuchField,
-                    else => error.NotAStruct,
+            const ins = code[pc];
+            switch (ins.op) {
+                .load_int => {
+                    env[ins.dst] = .{ .int = int_pool[ins.a] };
+                    pc += 1;
                 },
-                .const_ => |inner| {
-                    cur = inner;
-                    continue;
+                .load_float => {
+                    env[ins.dst] = .{ .float_ = float_pool[ins.a] };
+                    pc += 1;
                 },
-                .add => |op| {
-                    const a = try self.evalExpr(op.a, env);
-                    const b = try self.evalExpr(op.b, env);
-                    if (a.isInt() and b.isInt()) {
-                        return .{ .int = a.int +% b.int };
+                .load_str => {
+                    env[ins.dst] = .{ .str = str_pool[ins.a] };
+                    pc += 1;
+                },
+                .move => {
+                    env[ins.dst] = env[ins.a];
+                    pc += 1;
+                },
+                .load_named => {
+                    const name = str_pool[ins.a];
+                    env[ins.dst] = if (name.len > 0 and name[0] == 'W') .{ .int = 1 } else .{ .int = 0 };
+                    pc += 1;
+                },
+
+                .add => {
+                    const a = if (ins.flag & 0x01 != 0) int_pool[ins.a] else env[ins.a].int;
+                    const b = if (ins.flag & 0x02 != 0) int_pool[ins.b] else env[ins.b].int;
+                    env[ins.dst] = .{ .int = a +% b };
+                    pc += 1;
+                },
+                .sub => {
+                    const a = if (ins.flag & 0x01 != 0) int_pool[ins.a] else env[ins.a].int;
+                    const b = if (ins.flag & 0x02 != 0) int_pool[ins.b] else env[ins.b].int;
+                    env[ins.dst] = .{ .int = a -% b };
+                    pc += 1;
+                },
+                .mul => {
+                    const a = if (ins.flag & 0x01 != 0) int_pool[ins.a] else env[ins.a].int;
+                    const b = if (ins.flag & 0x02 != 0) int_pool[ins.b] else env[ins.b].int;
+                    env[ins.dst] = .{ .int = a *% b };
+                    pc += 1;
+                },
+                .div => {
+                    const a = if (ins.flag & 0x01 != 0) int_pool[ins.a] else env[ins.a].int;
+                    const b = if (ins.flag & 0x02 != 0) int_pool[ins.b] else env[ins.b].int;
+                    if (b == 0) return error.DivisionByZero;
+                    env[ins.dst] = .{ .int = @divTrunc(a, b) };
+                    pc += 1;
+                },
+                .lt => {
+                    const a = if (ins.flag & 0x01 != 0) int_pool[ins.a] else env[ins.a].int;
+                    const b = if (ins.flag & 0x02 != 0) int_pool[ins.b] else env[ins.b].int;
+                    env[ins.dst] = .{ .bool_ = a < b };
+                    pc += 1;
+                },
+                .gt => {
+                    const a = if (ins.flag & 0x01 != 0) int_pool[ins.a] else env[ins.a].int;
+                    const b = if (ins.flag & 0x02 != 0) int_pool[ins.b] else env[ins.b].int;
+                    env[ins.dst] = .{ .bool_ = a > b };
+                    pc += 1;
+                },
+                .le => {
+                    const a = if (ins.flag & 0x01 != 0) int_pool[ins.a] else env[ins.a].int;
+                    const b = if (ins.flag & 0x02 != 0) int_pool[ins.b] else env[ins.b].int;
+                    env[ins.dst] = .{ .bool_ = a <= b };
+                    pc += 1;
+                },
+                .ge => {
+                    const a = if (ins.flag & 0x01 != 0) int_pool[ins.a] else env[ins.a].int;
+                    const b = if (ins.flag & 0x02 != 0) int_pool[ins.b] else env[ins.b].int;
+                    env[ins.dst] = .{ .bool_ = a >= b };
+                    pc += 1;
+                },
+                .eq_val => {
+                    const av = env[ins.a];
+                    const bv = env[ins.b];
+                    env[ins.dst] = switch (av) {
+                        .int => |x| .{ .bool_ = x == bv.int },
+                        .str => |x| .{ .bool_ = std.mem.eql(u8, x, bv.str) },
+                        else => return error.TypeMismatch,
+                    };
+                    pc += 1;
+                },
+
+                .set_label => {
+                    cur_label_idx = ins.dst;
+                    pc += 1;
+                },
+                .jmp => {
+                    prev_label_idx = cur_label_idx;
+                    pc = ins.a;
+                },
+                .br_if => {
+                    const taken = switch (env[ins.dst]) {
+                        .bool_ => |b| b,
+                        .int => |n| n != 0,
+                        else => return error.TypeMismatch,
+                    };
+                    prev_label_idx = cur_label_idx;
+                    pc = if (taken) ins.a else ins.b;
+                },
+                .ret => return env[ins.dst],
+                .ret_void => return .void_,
+
+                .phi => {
+                    const entries = phi_tables[ins.a];
+                    var found = false;
+                    for (entries) |e| {
+                        if (e.pred_label_idx == prev_label_idx) {
+                            env[ins.dst] = env[e.src_reg];
+                            found = true;
+                            break;
+                        }
                     }
-                    return switch (a) {
-                        .float_ => |fa| .{ .float_ = fa + b.float_ },
-                        .double_ => |fa| .{ .double_ = fa + b.double_ },
-                        else => .{ .int = a.int +% b.int },
-                    };
+                    if (!found) return error.PhiNoMatchingArm;
+                    pc += 1;
                 },
-                .sub => |op| {
-                    const a = try self.evalExpr(op.a, env);
-                    const b = try self.evalExpr(op.b, env);
-                    return switch (a) {
-                        .float_ => |fa| .{ .float_ = fa - b.float_ },
-                        .double_ => |fa| .{ .double_ = fa - b.double_ },
-                        else => .{ .int = a.int -% b.int },
-                    };
+
+                .call_user, .call_user_void => {
+                    const ar = arg_ranges[ins.b];
+                    var buf: [32]Value = undefined;
+                    for (0..ar.len) |i| buf[i] = env[arg_regs[ar.start + i]];
+                    const result = try self.callFuncByIdx(ins.a, buf[0..ar.len]);
+                    if (ins.op == .call_user) env[ins.dst] = result;
+                    pc += 1;
                 },
-                .mul => |op| {
-                    const a = try self.evalExpr(op.a, env);
-                    const b = try self.evalExpr(op.b, env);
-                    return switch (a) {
-                        .float_ => |fa| .{ .float_ = fa * b.float_ },
-                        .double_ => |fa| .{ .double_ = fa * b.double_ },
-                        else => .{ .int = a.int *% b.int },
-                    };
+                .call_builtin, .call_builtin_void => {
+                    const ar = arg_ranges[ins.b];
+                    var buf: [32]Value = undefined;
+                    for (0..ar.len) |i| buf[i] = env[arg_regs[ar.start + i]];
+                    const tag: BuiltinTag = @enumFromInt(ins.a);
+                    const result = try self.execBuiltin(tag, buf[0..ar.len]);
+                    if (ins.op == .call_builtin) env[ins.dst] = result;
+                    pc += 1;
                 },
-                .div => |op| {
-                    const a = try self.evalExpr(op.a, env);
-                    const b = try self.evalExpr(op.b, env);
-                    return switch (a) {
-                        .float_ => |fa| .{ .float_ = fa / b.float_ },
-                        .double_ => |fa| .{ .double_ = fa / b.double_ },
-                        else => blk: {
-                            if (b.int == 0) return error.DivisionByZero;
-                            break :blk .{ .int = @divTrunc(a.int, b.int) };
-                        },
-                    };
-                },
-                .lt => |op| {
-                    const a = try self.evalExprFast(op.a, env);
-                    const b = try self.evalExprFast(op.b, env);
-                    return .{ .bool_ = a < b };
-                },
-                .gt => |op| {
-                    const a = try self.evalExprFast(op.a, env);
-                    const b = try self.evalExprFast(op.b, env);
-                    return .{ .bool_ = a > b };
-                },
-                .le => |op| {
-                    const a = try self.evalExprFast(op.a, env);
-                    const b = try self.evalExprFast(op.b, env);
-                    return .{ .bool_ = a <= b };
-                },
-                .ge => |op| {
-                    const a = try self.evalExprFast(op.a, env);
-                    const b = try self.evalExprFast(op.b, env);
-                    return .{ .bool_ = a >= b };
-                },
-                .eq => |op| {
-                    const a = try self.evalExpr(op.a, env);
-                    const b = try self.evalExpr(op.b, env);
-                    return switch (a) {
-                        .int => |x| .{ .bool_ = x == b.int },
-                        .str => |x| .{ .bool_ = std.mem.eql(u8, x, b.str) },
-                        else => error.TypeMismatch,
-                    };
-                },
-                .alloc => |size_expr| {
-                    const n: usize = @intCast((try self.evalExpr(size_expr, env)).int);
+
+                .alloc_bytes => {
+                    const n: usize = @intCast(env[ins.a].int);
                     const buf = try self.alloc.alloc(u8, n);
                     @memset(buf, 0);
-                    return .{ .ptr = buf };
+                    env[ins.dst] = .{ .ptr = buf };
+                    pc += 1;
                 },
-                .alloc_type => |type_name| {
+                .alloc_type => {
+                    const type_name = str_pool[ins.a];
                     const struct_def = blk: {
-                        for (self.program.structs.items) |*sd| {
+                        for (self.program.structs.items) |*sd|
                             if (std.mem.eql(u8, sd.name, type_name)) break :blk sd;
-                        }
                         return error.UnknownType;
                     };
                     const hs = try self.alloc.create(HeapStruct);
-                    hs.* = .{
-                        .name = struct_def.name,
-                        .fields = std.StringArrayHashMap(HeapCell).init(self.alloc),
-                    };
+                    hs.* = .{ .name = struct_def.name, .fields = std.StringArrayHashMap(HeapCell).init(self.alloc) };
                     for (struct_def.fields.items) |f| {
                         const zero: Value = switch (f.ty) {
                             .int => .{ .int = 0 },
@@ -555,101 +967,88 @@ pub const Vm = struct {
                     ha.* = .{ .cells = try self.alloc.alloc(HeapCell, 1), .alloc = self.alloc };
                     ha.cells[0] = .{ .value = .{ .int = @as(i64, @bitCast(@intFromPtr(hs))) } };
                     try self.heap_arrays.append(self.alloc, ha);
-                    return .{ .ref = &ha.cells[0] };
+                    env[ins.dst] = .{ .ref = &ha.cells[0] };
+                    pc += 1;
                 },
-                .alloc_array => |aa| {
-                    const count: usize = @intCast((try self.evalExpr(aa.count, env)).int);
+                .alloc_array => {
+                    const count: usize = @intCast(env[ins.a].int);
+                    const elem_ty: lexer.Ty = @enumFromInt(ins.flag);
                     const ha = try self.alloc.create(HeapArray);
                     ha.* = .{ .cells = try self.alloc.alloc(HeapCell, count), .alloc = self.alloc };
-                    for (ha.cells) |*cell| {
-                        cell.* = .{ .value = switch (aa.elem_ty) {
-                            .int => .{ .int = 0 },
-                            .bool_ => .{ .bool_ = false },
-                            .str => .{ .str = "" },
-                            else => .void_,
-                        } };
-                    }
+                    for (ha.cells) |*cell| cell.* = .{ .value = switch (elem_ty) {
+                        .int => .{ .int = 0 },
+                        .bool_ => .{ .bool_ = false },
+                        .str => .{ .str = "" },
+                        else => .void_,
+                    } };
                     try self.heap_arrays.append(self.alloc, ha);
-                    return .{ .ref = &ha.cells[0] };
+                    env[ins.dst] = .{ .ref = &ha.cells[0] };
+                    pc += 1;
                 },
-                .load => |ptr_reg| {
-                    const cell = switch (env[ptr_reg]) {
+                .load_ref => {
+                    env[ins.dst] = switch (env[ins.a]) {
+                        .ref => |r| r.value,
+                        else => return error.NotAPointer,
+                    };
+                    pc += 1;
+                },
+                .store_ref => {
+                    const cell = switch (env[ins.dst]) {
                         .ref => |r| r,
                         else => return error.NotAPointer,
                     };
-                    return cell.value;
+                    const val = env[ins.a];
+                    const is_sentinel = blk: {
+                        for (self.heap_arrays.items) |ha| {
+                            if (ha.cells.len == 1 and &ha.cells[0] == cell) {
+                                const hs: *HeapStruct = @ptrFromInt(@as(usize, @intCast(cell.value.int)));
+                                switch (val) {
+                                    .struct_ => |sv| {
+                                        var it = sv.fields.iterator();
+                                        while (it.next()) |entry| {
+                                            if (hs.fields.getPtr(entry.key_ptr.*)) |fc| fc.value = entry.value_ptr.* else try hs.fields.put(entry.key_ptr.*, .{ .value = entry.value_ptr.* });
+                                        }
+                                    },
+                                    else => return error.TypeMismatch,
+                                }
+                                break :blk true;
+                            }
+                        }
+                        break :blk false;
+                    };
+                    if (!is_sentinel) cell.value = val;
+                    pc += 1;
                 },
-                .get_field_ref => |gfr| {
-                    const cell = switch (env[gfr.ptr]) {
+                .get_field_ref => {
+                    const cell = switch (env[ins.a]) {
                         .ref => |r| r,
                         else => return error.NotAPointer,
                     };
                     const hs: *HeapStruct = @ptrFromInt(@as(usize, @intCast(cell.value.int)));
-                    const field_cell = hs.fields.getPtr(gfr.field) orelse return error.NoSuchField;
-                    return .{ .ref = field_cell };
+                    const fc = hs.fields.getPtr(str_pool[ins.b]) orelse return error.NoSuchField;
+                    env[ins.dst] = .{ .ref = fc };
+                    pc += 1;
                 },
-                .get_index_ref => |gir| {
-                    const base_cell = switch (env[gir.arr]) {
+                .get_index_ref => {
+                    const base = switch (env[ins.a]) {
                         .ref => |r| r,
                         else => return error.NotAPointer,
                     };
-                    const idx: usize = @intCast((try self.evalExpr(gir.idx, env)).int);
+                    const idx: usize = @intCast(env[ins.b].int);
                     const ha = blk: {
-                        for (self.heap_arrays.items) |ha| {
-                            if (ha.cells.len > 0 and &ha.cells[0] == base_cell) break :blk ha;
-                        }
+                        for (self.heap_arrays.items) |ha|
+                            if (ha.cells.len > 0 and &ha.cells[0] == base) break :blk ha;
                         return error.InvalidArrayPointer;
                     };
                     if (idx >= ha.cells.len) return error.IndexOutOfBounds;
-                    return .{ .ref = &ha.cells[idx] };
+                    env[ins.dst] = .{ .ref = &ha.cells[idx] };
+                    pc += 1;
                 },
-                .struct_lit => |sl| {
-                    var fields = std.StringArrayHashMap(Value).init(self.alloc);
-                    for (sl.fields.items) |fi|
-                        try fields.put(fi.name, try self.evalExpr(fi.expr, env));
-                    return .{ .struct_ = .{ .name = sl.name, .fields = fields } };
-                },
-                .named => |name| {
-                    if (name.len > 0) {
-                        if (name[0] == 'R') return .{ .int = 0 };
-                        if (name[0] == 'W') return .{ .int = 1 };
-                    }
-                    return error.UnknownNamedConstant;
-                },
-                .spawn => |s| {
-                    const task_table = self.tasks orelse return error.NoTaskTable;
-                    var args_buf: [32]Value = undefined;
-                    const argc = s.args.items.len;
-                    if (argc > 32) return error.TooManyArguments;
-                    for (s.args.items, 0..) |a, i|
-                        args_buf[i] = try self.evalExpr(a, env);
-                    const args_heap = try self.alloc.alloc(Value, argc);
-                    @memcpy(args_heap, args_buf[0..argc]);
-                    const task_id = try task_table.reserve();
-                    const sa = try self.alloc.create(SpawnArgs);
-                    sa.* = .{
-                        .program = self.program,
-                        .func_name = s.name,
-                        .args = args_heap,
-                        .task_id = task_id,
-                        .tasks = task_table,
-                        .alloc = self.alloc,
-                    };
-                    const thread = try std.Thread.spawn(.{}, spawnEntry, .{sa});
-                    task_table.setThread(task_id, thread);
-                    return .{ .int = @intCast(task_id) };
-                },
-                .sync => |reg| {
-                    const task_table = self.tasks orelse return error.NoTaskTable;
-                    const task_id: u32 = @intCast(env[reg].int);
-                    return try task_table.join(task_id);
-                },
-                .call => |c| return try self.callFunc(c.name, c.args.items, env),
-                .free => |ptr_reg| {
-                    switch (env[ptr_reg]) {
+                .free_reg => {
+                    switch (env[ins.dst]) {
                         .ptr => |p| {
                             self.alloc.free(p);
-                            env[ptr_reg] = .void_;
+                            env[ins.dst] = .void_;
                         },
                         .ref => |r| {
                             for (self.heap_arrays.items, 0..) |ha, i| {
@@ -658,42 +1057,108 @@ pub const Vm = struct {
                                     self.alloc.destroy(ha);
                                     self.heap_arrays.items[i] = self.heap_arrays.items[self.heap_arrays.items.len - 1];
                                     self.heap_arrays.items.len -= 1;
-                                    env[ptr_reg] = .void_;
-                                    return .void_;
+                                    env[ins.dst] = .void_;
+                                    break;
                                 }
                             }
-                            return error.InvalidFree;
                         },
                         else => return error.InvalidFree,
                     }
-                    return .void_;
+                    pc += 1;
                 },
                 .arena_create => {
                     const arena = try self.alloc.create(BearArena);
                     arena.* = BearArena.init(self.alloc);
+                    var placed = false;
                     for (self.arenas.items, 0..) |slot, i| {
                         if (slot == null) {
                             self.arenas.items[i] = arena;
-                            return .{ .int = @intCast(i) };
+                            env[ins.dst] = .{ .int = @intCast(i) };
+                            placed = true;
+                            break;
                         }
                     }
-                    try self.arenas.append(self.alloc, arena);
-                    return .{ .int = @intCast(self.arenas.items.len - 1) };
+                    if (!placed) {
+                        try self.arenas.append(self.alloc, arena);
+                        env[ins.dst] = .{ .int = @intCast(self.arenas.items.len - 1) };
+                    }
+                    pc += 1;
                 },
-                .arena_alloc => |aa| {
-                    const arena_id: usize = @intCast(env[aa.arena].int);
+                .arena_alloc => {
+                    const arena_id: usize = @intCast(env[ins.a].int);
                     if (arena_id >= self.arenas.items.len) return error.InvalidArena;
                     const arena = self.arenas.items[arena_id] orelse return error.InvalidArena;
-                    const n: usize = @intCast((try self.evalExpr(aa.size, env)).int);
+                    const n: usize = @intCast(env[ins.b].int);
                     const buf = try arena.allocator().alloc(u8, n);
                     @memset(buf, 0);
-                    return .{ .arena_ptr = buf };
+                    env[ins.dst] = .{ .arena_ptr = buf };
+                    pc += 1;
                 },
-                .phi => return error.PhiWithNoPredecessor,
-                .float_lit => |f| return .{ .float_ = f },
-                .cast => |c| {
-                    const v = try self.evalExpr(c.expr, env);
-                    return switch (c.ty) {
+                .arena_destroy => {
+                    const arena_id: usize = @intCast(env[ins.dst].int);
+                    if (arena_id < self.arenas.items.len) {
+                        if (self.arenas.items[arena_id]) |arena| {
+                            arena.deinit();
+                            self.alloc.destroy(arena);
+                            self.arenas.items[arena_id] = null;
+                        }
+                    }
+                    env[ins.dst] = .void_;
+                    pc += 1;
+                },
+
+                .struct_lit => {
+                    const name = str_pool[ins.a];
+                    const ar = arg_ranges[ins.b];
+                    var fields = std.StringArrayHashMap(Value).init(self.alloc);
+                    var i: usize = 0;
+                    while (i < ar.len) : (i += 1) {
+                        const fn_idx = arg_regs[ar.start + i * 2];
+                        const val_reg = arg_regs[ar.start + i * 2 + 1];
+                        try fields.put(str_pool[fn_idx], env[val_reg]);
+                    }
+                    env[ins.dst] = .{ .struct_ = .{ .name = name, .fields = fields } };
+                    pc += 1;
+                },
+                .set_field => {
+                    try env[ins.dst].struct_.fields.put(str_pool[ins.a], env[ins.b]);
+                    pc += 1;
+                },
+                .get_field => {
+                    env[ins.dst] = switch (env[ins.a]) {
+                        .struct_ => |sv| sv.fields.get(str_pool[ins.b]) orelse return error.NoSuchField,
+                        else => return error.NotAStruct,
+                    };
+                    pc += 1;
+                },
+
+                .spawn => {
+                    const task_table = self.tasks orelse return error.NoTaskTable;
+                    const ar = arg_ranges[ins.b];
+                    if (ar.len > 32) return error.TooManyArguments;
+                    var buf: [32]Value = undefined;
+                    for (0..ar.len) |i| buf[i] = env[arg_regs[ar.start + i]];
+                    const func_name = str_pool[ins.a];
+                    const args_heap = try self.alloc.alloc(Value, ar.len);
+                    @memcpy(args_heap, buf[0..ar.len]);
+                    const task_id = try task_table.reserve();
+                    const sa = try self.alloc.create(SpawnArgs);
+                    sa.* = .{ .program = self.program, .func_name = func_name, .args = args_heap, .task_id = task_id, .tasks = task_table, .alloc = self.alloc };
+                    const thread = try std.Thread.spawn(.{}, spawnEntry, .{sa});
+                    task_table.setThread(task_id, thread);
+                    env[ins.dst] = .{ .int = @intCast(task_id) };
+                    pc += 1;
+                },
+                .sync_task => {
+                    const task_table = self.tasks orelse return error.NoTaskTable;
+                    env[ins.dst] = try task_table.join(@intCast(env[ins.a].int));
+                    pc += 1;
+                },
+
+                .cast => {
+                    const v = env[ins.a];
+                    const ty: lexer.Ty = @enumFromInt(ins.flag);
+                    env[ins.dst] = switch (ty) {
                         .int => switch (v) {
                             .float_ => |f| .{ .int = @intFromFloat(f) },
                             .double_ => |f| .{ .int = @intFromFloat(f) },
@@ -714,90 +1179,10 @@ pub const Vm = struct {
                         },
                         else => return error.InvalidCast,
                     };
+                    pc += 1;
                 },
             }
         }
-    }
-
-    /// Fast path for expressions that are almost always .reg or .int literals.
-    /// Returns the raw i64 directly, skipping Value boxing.
-    inline fn evalExprFast(self: *Vm, expr: *const lexer.Expr, env: []Value) anyerror!i64 {
-        return switch (expr.*) {
-            .reg => |r| env[r].int,
-            .int => |n| n,
-            .const_ => |inner| switch (inner.*) {
-                .int => |n| n,
-                .reg => |r| env[r].int,
-                else => (try self.evalExpr(expr, env)).int,
-            },
-            else => (try self.evalExpr(expr, env)).int,
-        };
-    }
-
-    fn printValue(_: *Vm, val: Value) void {
-        var tmp: [64]u8 = undefined;
-        switch (val) {
-            .int => |n| bear_io.writeStdout(std.fmt.bufPrint(&tmp, "{d}\n", .{n}) catch return),
-            .float_ => |f| bear_io.writeStdout(std.fmt.bufPrint(&tmp, "{d}\n", .{f}) catch return),
-            .double_ => |f| bear_io.writeStdout(std.fmt.bufPrint(&tmp, "{d}\n", .{f}) catch return),
-            .str => |s| {
-                bear_io.writeStdout(s);
-                bear_io.writeStdout("\n");
-            },
-            .bool_ => |b| bear_io.writeStdout(if (b) "true\n" else "false\n"),
-            .ptr => bear_io.writeStdout("<ptr>\n"),
-            .arena_ptr => bear_io.writeStdout("<arena_ptr>\n"),
-            .ref => bear_io.writeStdout("<ref>\n"),
-            .file => |fd| bear_io.writeStdout(std.fmt.bufPrint(&tmp, "<fd:{d}>\n", .{fd}) catch return),
-            .void_ => {},
-            .struct_ => |sv| {
-                bear_io.writeStdout(sv.name);
-                bear_io.writeStdout(" { ... }\n");
-            },
-        }
-    }
-
-    fn callFunc(self: *Vm, name: []const u8, arg_exprs: []*lexer.Expr, env: []Value) anyerror!Value {
-        var args_buf: [32]Value = undefined;
-        const argc = arg_exprs.len;
-        if (argc > 32) return error.TooManyArguments;
-        for (arg_exprs, 0..) |a, i|
-            args_buf[i] = try self.evalExpr(a, env);
-        const target = self.call_cache.get(name) orelse return error.UndefinedFunction;
-        return switch (target) {
-            .builtin => |tag| self.execBuiltin(tag, args_buf[0..argc]),
-            .user => |idx| self.callFuncByIdx(idx, args_buf[0..argc]),
-        };
-    }
-
-    pub fn callFuncWithValues(self: *Vm, name: []const u8, args: []Value) anyerror!Value {
-        const target = self.call_cache.get(name) orelse return error.UndefinedFunction;
-        return switch (target) {
-            .builtin => |tag| self.execBuiltin(tag, args),
-            .user => |idx| self.callFuncByIdx(idx, args),
-        };
-    }
-
-    /// Call a user function by its pre-resolved index. Avoids hash lookup on hot paths.
-    fn callFuncByIdx(self: *Vm, idx: u32, args: []Value) anyerror!Value {
-        const func = &self.program.functions.items[idx];
-
-        var stack_env: [64]Value = undefined;
-        const new_env: []Value = if (func.n_regs <= 64) blk: {
-            break :blk stack_env[0..func.n_regs];
-        } else blk: {
-            const e = try self.alloc.alloc(Value, func.n_regs);
-            break :blk e;
-        };
-        defer if (func.n_regs > 64) {
-            for (new_env) |*v| v.deinit(self.alloc);
-            self.alloc.free(new_env);
-        };
-
-        for (func.params.items, 0..) |param, i|
-            new_env[param.idx] = args[i];
-
-        return (try self.execBody(func.body.items, new_env, idx)) orelse .void_;
     }
 
     fn execBuiltin(self: *Vm, tag: BuiltinTag, args: []Value) anyerror!Value {
@@ -810,11 +1195,9 @@ pub const Vm = struct {
                 const path = args[0].str;
                 const mode = args[1].int;
                 const fd = if (mode == 0) inner: {
-                    const f = try std.fs.cwd().openFile(path, .{});
-                    break :inner try self.allocFile(.{ .read = f });
+                    break :inner try self.allocFile(.{ .read = try std.fs.cwd().openFile(path, .{}) });
                 } else inner: {
-                    const f = try std.fs.cwd().createFile(path, .{ .truncate = true });
-                    break :inner try self.allocFile(.{ .write = f });
+                    break :inner try self.allocFile(.{ .write = try std.fs.cwd().createFile(path, .{ .truncate = true }) });
                 };
                 break :blk .{ .file = fd };
             },
@@ -844,15 +1227,13 @@ pub const Vm = struct {
             },
             .close => blk: {
                 const fd: usize = @intCast(args[0].file);
-                if (fd < self.files.items.len) {
-                    if (self.files.items[fd]) |fh| {
-                        switch (fh) {
-                            .read => |f| f.close(),
-                            .write => |f| f.close(),
-                        }
-                        self.files.items[fd] = null;
+                if (fd < self.files.items.len) if (self.files.items[fd]) |fh| {
+                    switch (fh) {
+                        .read => |f| f.close(),
+                        .write => |f| f.close(),
                     }
-                }
+                    self.files.items[fd] = null;
+                };
                 break :blk .void_;
             },
             .flush => blk: {
@@ -866,203 +1247,30 @@ pub const Vm = struct {
         };
     }
 
-    pub fn execBody(self: *Vm, stmts: []const lexer.Stmt, env: []Value, func_idx: u32) anyerror!?Value {
-        const jump_table = self.jump_tables[func_idx];
-        const br_table = self.br_tables[func_idx];
-        const label_map = &self.label_maps[func_idx];
-        const call_table = self.call_tables[func_idx];
-        return self.execBodyWithTables(stmts, env, label_map, jump_table, br_table, call_table);
+    fn printValue(_: *Vm, val: Value) void {
+        var tmp: [64]u8 = undefined;
+        switch (val) {
+            .int => |n| bear_io.writeStdout(std.fmt.bufPrint(&tmp, "{d}\n", .{n}) catch return),
+            .float_ => |f| bear_io.writeStdout(std.fmt.bufPrint(&tmp, "{d}\n", .{f}) catch return),
+            .double_ => |f| bear_io.writeStdout(std.fmt.bufPrint(&tmp, "{d}\n", .{f}) catch return),
+            .str => |s| {
+                bear_io.writeStdout(s);
+                bear_io.writeStdout("\n");
+            },
+            .bool_ => |b| bear_io.writeStdout(if (b) "true\n" else "false\n"),
+            .ptr => bear_io.writeStdout("<ptr>\n"),
+            .arena_ptr => bear_io.writeStdout("<arena_ptr>\n"),
+            .ref => bear_io.writeStdout("<ref>\n"),
+            .file => |fd| bear_io.writeStdout(std.fmt.bufPrint(&tmp, "<fd:{d}>\n", .{fd}) catch return),
+            .void_ => {},
+            .struct_ => |sv| {
+                bear_io.writeStdout(sv.name);
+                bear_io.writeStdout(" { ... }\n");
+            },
+        }
     }
 
-    fn execBodyWithTables(self: *Vm, stmts: []const lexer.Stmt, env: []Value, label_map: *const LabelMap, jump_table: []const i32, br_table: []const BrEntry, call_table: []const ?CallTarget) anyerror!?Value {
-        var pc: usize = 0;
-        var prev_label: ?[]const u8 = null;
-        var cur_label: ?[]const u8 = null;
-        const len = stmts.len;
-        while (pc < len) {
-            switch (stmts[pc]) {
-                .assign => |a| {
-                    if (call_table[pc]) |target| {
-                        const c = a.expr.call;
-                        var args_buf: [32]Value = undefined;
-                        const argc = c.args.items.len;
-                        for (c.args.items, 0..) |arg, i|
-                            args_buf[i] = try self.evalExpr(arg, env);
-                        env[a.reg] = switch (target) {
-                            .builtin => |tag| try self.execBuiltin(tag, args_buf[0..argc]),
-                            .user => |idx| try self.callFuncByIdx(idx, args_buf[0..argc]),
-                        };
-                    } else {
-                        env[a.reg] = try self.evalExprWithPrev(a.expr, env, prev_label);
-                    }
-                    pc += 1;
-                },
-                .set_field => |sf| {
-                    const val = try self.evalExpr(sf.expr, env);
-                    try env[sf.reg].struct_.fields.put(sf.field, val);
-                    pc += 1;
-                },
-                .free => |ptr_reg| {
-                    switch (env[ptr_reg]) {
-                        .ptr => |p| {
-                            self.alloc.free(p);
-                            env[ptr_reg] = .void_;
-                        },
-                        .ref => |r| {
-                            for (self.heap_arrays.items, 0..) |ha, i| {
-                                if (ha.cells.len > 0 and &ha.cells[0] == r) {
-                                    ha.deinit();
-                                    self.alloc.destroy(ha);
-                                    self.heap_arrays.items[i] = self.heap_arrays.items[self.heap_arrays.items.len - 1];
-                                    self.heap_arrays.items.len -= 1;
-                                    env[ptr_reg] = .void_;
-                                    break;
-                                }
-                            }
-                        },
-                        else => return error.InvalidFree,
-                    }
-                    pc += 1;
-                },
-                .arena_destroy => |arena_reg| {
-                    const arena_id: usize = @intCast(env[arena_reg].int);
-                    if (arena_id < self.arenas.items.len) {
-                        if (self.arenas.items[arena_id]) |arena| {
-                            arena.deinit();
-                            self.alloc.destroy(arena);
-                            self.arenas.items[arena_id] = null;
-                        }
-                    }
-                    env[arena_reg] = .void_;
-                    pc += 1;
-                },
-                .store => |s| {
-                    const cell = switch (env[s.ptr]) {
-                        .ref => |r| r,
-                        else => return error.NotAPointer,
-                    };
-                    const val = try self.evalExpr(s.expr, env);
-                    const is_struct_sentinel = blk: {
-                        for (self.heap_arrays.items) |ha| {
-                            if (ha.cells.len == 1 and &ha.cells[0] == cell) {
-                                const hs: *HeapStruct = @ptrFromInt(@as(usize, @intCast(cell.value.int)));
-                                switch (val) {
-                                    .struct_ => |sv| {
-                                        var it = sv.fields.iterator();
-                                        while (it.next()) |entry| {
-                                            if (hs.fields.getPtr(entry.key_ptr.*)) |fc| {
-                                                fc.value = entry.value_ptr.*;
-                                            } else {
-                                                try hs.fields.put(entry.key_ptr.*, .{ .value = entry.value_ptr.* });
-                                            }
-                                        }
-                                    },
-                                    else => return error.TypeMismatch,
-                                }
-                                break :blk true;
-                            }
-                        }
-                        break :blk false;
-                    };
-                    if (!is_struct_sentinel) {
-                        cell.value = val;
-                    }
-                    pc += 1;
-                },
-                .call => |c| {
-                    if (call_table[pc]) |target| {
-                        var args_buf: [32]Value = undefined;
-                        const argc = c.args.items.len;
-                        for (c.args.items, 0..) |arg, i|
-                            args_buf[i] = try self.evalExpr(arg, env);
-                        _ = switch (target) {
-                            .builtin => |tag| try self.execBuiltin(tag, args_buf[0..argc]),
-                            .user => |idx| try self.callFuncByIdx(idx, args_buf[0..argc]),
-                        };
-                    } else {
-                        _ = try self.callFunc(c.name, c.args.items, env);
-                    }
-                    pc += 1;
-                },
-                .ret => |e| return try self.evalExpr(e, env),
-                .while_ => |*w| {
-                    var body_lm = LabelMap{};
-                    defer body_lm.deinit(self.alloc);
-                    try buildLabelMap(&body_lm, w.body.items, self.alloc);
-
-                    const wlen = w.body.items.len;
-                    const wjt = try self.alloc.alloc(i32, wlen);
-                    defer self.alloc.free(wjt);
-                    @memset(wjt, -1);
-                    const wbt = try self.alloc.alloc(BrEntry, wlen);
-                    defer self.alloc.free(wbt);
-                    @memset(wbt, .{ -1, -1 });
-                    const wct = try self.alloc.alloc(?CallTarget, wlen);
-                    defer self.alloc.free(wct);
-                    @memset(wct, null);
-                    for (w.body.items, 0..) |*ws, wsi| {
-                        switch (ws.*) {
-                            .jmp => |t| { wjt[wsi] = @intCast(body_lm.get(t) orelse continue); },
-                            .br_if => |br2| {
-                                const t2: i32 = @intCast(body_lm.get(br2.true_label) orelse continue);
-                                const f3: i32 = @intCast(body_lm.get(br2.false_label) orelse continue);
-                                wbt[wsi] = .{ t2, f3 };
-                            },
-                            .call => |wc| wct[wsi] = self.call_cache.get(wc.name),
-                            .assign => |wa| if (wa.expr.* == .call) {
-                                wct[wsi] = self.call_cache.get(wa.expr.call.name);
-                            },
-                            else => {},
-                        }
-                    }
-
-                    const body = w.body.items;
-                    const cond = w.cond;
-
-                    while (true) {
-                        const keep = switch (try self.evalExpr(cond, env)) {
-                            .bool_ => |b| b,
-                            .int => |n| n != 0,
-                            else => return error.TypeMismatch,
-                        };
-                        if (!keep) break;
-
-                        if (try self.execBodyWithTables(body, env, &body_lm, wjt, wbt, wct)) |v| return v;
-                    }
-                    pc += 1;
-                },
-                .label => |name| {
-                    cur_label = name;
-                    pc += 1;
-                },
-                .jmp => |target| {
-                    prev_label = cur_label;
-                    const cached = jump_table[pc];
-                    pc = if (cached >= 0) @intCast(cached) else label_map.get(target) orelse return error.UndefinedLabel;
-                },
-                .br_if => |br| {
-                    const taken = switch (env[br.cond]) {
-                        .bool_ => |b| b,
-                        .int => |n| n != 0,
-                        else => return error.TypeMismatch,
-                    };
-                    prev_label = cur_label;
-                    const entry = br_table[pc];
-                    if (taken) {
-                        pc = if (entry[0] >= 0) @intCast(entry[0]) else label_map.get(br.true_label) orelse return error.UndefinedLabel;
-                    } else {
-                        pc = if (entry[1] >= 0) @intCast(entry[1]) else label_map.get(br.false_label) orelse return error.UndefinedLabel;
-                    }
-                },
-            }
-        }
-        return null;
+    pub fn execBody(self: *Vm, _: []const lexer.Stmt, _: []Value, func_idx: u32) anyerror!?Value {
+        return try self.callFuncByIdx(func_idx, &.{});
     }
 };
-
-/// Build a label->index map for a flat statement list.
-fn buildLabelMap(lm: *LabelMap, stmts: []const lexer.Stmt, alloc: std.mem.Allocator) !void {
-    for (stmts, 0..) |*s, i| {
-        if (s.* == .label) try lm.put(alloc, s.label, i);
-    }
-}
