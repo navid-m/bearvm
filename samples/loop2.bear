@@ -1,0 +1,22 @@
+@main(): int {
+    %i = const 0
+    %sum = const 0
+
+loop_cond:
+    %cond = lt %i, 100000000
+    br_if %cond, loop_body, loop_end
+
+loop_body:
+    %sum_next = add %sum, %i
+    %i_next = add %i, 1
+
+    %sum = %sum_next
+    %i = %i_next
+
+    jmp loop_cond
+
+loop_end:
+    call puts(%sum)
+    call flush()
+    ret 0
+}
