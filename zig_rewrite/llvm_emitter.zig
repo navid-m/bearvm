@@ -87,6 +87,18 @@ const Emitter = struct {
         return error.UnknownField;
     }
 
+    fn fieldIsPtr(self: *Emitter, field: []const u8) bool {
+        var it = self.structs.iterator();
+        while (it.next()) |entry| {
+            for (entry.value_ptr.*) |f| {
+                if (std.mem.eql(u8, f.name, field)) {
+                    return f.ty == .str or f.ty == .named;
+                }
+            }
+        }
+        return false;
+    }
+
     fn emitExpr(self: *Emitter, expr: *lexer.Expr, env: []Slot) !Slot {
         switch (expr.*) {
             .int => |n| {
@@ -113,6 +125,7 @@ const Emitter = struct {
             .field => |f| {
                 const base = env[f.reg];
                 const idx = try self.fieldOffset(f.field);
+                const is_ptr_field = self.fieldIsPtr(f.field);
                 const gep = self.fresh();
                 try self.out.appendSlice(self.alloc, "  ");
                 try self.writeTmp(gep);
@@ -124,9 +137,16 @@ const Emitter = struct {
                 const val = self.fresh();
                 try self.out.appendSlice(self.alloc, "  ");
                 try self.writeTmp(val);
-                try self.out.appendSlice(self.alloc, " = load i64, ptr ");
-                try self.writeTmp(gep);
-                try self.out.append(self.alloc, '\n');
+                if (is_ptr_field) {
+                    try self.out.appendSlice(self.alloc, " = load ptr, ptr ");
+                    try self.writeTmp(gep);
+                    try self.out.append(self.alloc, '\n');
+                    try self.ptr_tmps.put(self.alloc, val, {});
+                } else {
+                    try self.out.appendSlice(self.alloc, " = load i64, ptr ");
+                    try self.writeTmp(gep);
+                    try self.out.append(self.alloc, '\n');
+                }
                 return .{ .tmp = val };
             },
             .const_ => |inner| return self.emitExpr(inner, env),
@@ -178,7 +198,9 @@ const Emitter = struct {
                             break;
                         }
                     }
-                    const v = try self.emitExpr(fval orelse return error.MissingField, env);
+                    const field_expr = fval orelse return error.MissingField;
+                    const v = try self.emitExpr(field_expr, env);
+                    const is_ptr_val = self.isPtr(field_expr, env);
                     const gep = self.fresh();
                     try self.out.appendSlice(self.alloc, "  ");
                     try self.writeTmp(gep);
@@ -186,7 +208,7 @@ const Emitter = struct {
                     try self.writeTmp(ptr);
                     const off = std.fmt.bufPrint(&buf, ", i64 {d}\n", .{i}) catch unreachable;
                     try self.out.appendSlice(self.alloc, off);
-                    try self.out.appendSlice(self.alloc, "  store i64 ");
+                    try self.out.appendSlice(self.alloc, if (is_ptr_val) "  store ptr " else "  store i64 ");
                     try self.writeSlot(v);
                     try self.out.appendSlice(self.alloc, ", ptr ");
                     try self.writeTmp(gep);
@@ -395,6 +417,7 @@ const Emitter = struct {
                 .tmp => |id| self.ptr_tmps.contains(id),
                 .undef => false,
             },
+            .field => |f| self.fieldIsPtr(f.field),
             else => false,
         };
     }
@@ -405,7 +428,7 @@ const Emitter = struct {
         const argc = arg_exprs.len;
         for (arg_exprs, 0..) |a, i| {
             slots_buf[i] = try self.emitExpr(a, env);
-            is_ptr_buf[i] = self.isPtr(a, env) or (std.mem.eql(u8, name, "puts") and i == 0);
+            is_ptr_buf[i] = self.isPtr(a, env);
         }
         const ret_ty: []const u8 = if (std.mem.eql(u8, name, "puts")) "i32" else "i64";
         const t = self.fresh();
@@ -431,7 +454,7 @@ const Emitter = struct {
         const argc = arg_exprs.len;
         for (arg_exprs, 0..) |a, i| {
             slots_buf[i] = try self.emitExpr(a, env);
-            is_ptr_buf[i] = self.isPtr(a, env) or (std.mem.eql(u8, name, "puts") and i == 0);
+            is_ptr_buf[i] = self.isPtr(a, env);
         }
         const ret_ty: []const u8 = if (std.mem.eql(u8, name, "puts")) "i32" else "i64";
         const t = self.fresh();
@@ -456,6 +479,7 @@ const Emitter = struct {
             .set_field => |sf| {
                 const base = env[sf.reg];
                 const idx = try self.fieldOffset(sf.field);
+                const is_ptr_val = self.isPtr(sf.expr, env);
                 const v = try self.emitExpr(sf.expr, env);
                 const gep = self.fresh();
                 try self.out.appendSlice(self.alloc, "  ");
@@ -465,7 +489,7 @@ const Emitter = struct {
                 var buf: [24]u8 = undefined;
                 const s = std.fmt.bufPrint(&buf, ", i64 {d}\n", .{idx}) catch unreachable;
                 try self.out.appendSlice(self.alloc, s);
-                try self.out.appendSlice(self.alloc, "  store i64 ");
+                try self.out.appendSlice(self.alloc, if (is_ptr_val) "  store ptr " else "  store i64 ");
                 try self.writeSlot(v);
                 try self.out.appendSlice(self.alloc, ", ptr ");
                 try self.writeTmp(gep);

@@ -11,7 +11,7 @@ struct Person {
 
 	call puts(%p.name)
 	set %p.age = add %p.age, 1
-	call puts(%p.age)
+	call putf(%p.age)
 
 	ret 0
 }
