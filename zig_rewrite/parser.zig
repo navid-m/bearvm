@@ -85,12 +85,30 @@ const Parser = struct {
         };
     }
 
+    /// Accept any token that can serve as a function name in a call expression:
+    /// .ident, .func, or any type/keyword token whose string we know statically.
+    fn parseFuncName(self: *Parser) ParseError![]const u8 {
+        return switch (self.advance()) {
+            .ident => |s| s,
+            .func => |s| s,
+            .ty_int => "int",
+            .ty_void => "void",
+            .ty_string => "string",
+            .ty_bool => "bool",
+            .ty_float => "float",
+            .ty_double => "double",
+            else => error.ExpectedFuncName,
+        };
+    }
+
     fn parseTy(self: *Parser) ParseError!lexer.Ty {
         return switch (self.advance()) {
             .ty_int => .int,
             .ty_void => .void_,
             .ty_string => .str,
             .ty_bool => .bool_,
+            .ty_float => .float_,
+            .ty_double => .double_,
             .ident => .named,
             else => error.ExpectedType,
         };
@@ -136,7 +154,13 @@ const Parser = struct {
         return switch (self.peek()) {
             .kw_const => blk: {
                 _ = self.advance();
-                break :blk try self.parseExpr(rm);
+                const inner = try self.parseExpr(rm);
+                if (std.meta.activeTag(self.peek()) == .colon) {
+                    _ = self.advance();
+                    const ty = try self.parseTy();
+                    break :blk try self.box(.{ .cast = .{ .ty = ty, .expr = inner } });
+                }
+                break :blk inner;
             },
             .kw_add => try self.parseBinOp(rm, .kw_add),
             .kw_sub => try self.parseBinOp(rm, .kw_sub),
@@ -149,21 +173,13 @@ const Parser = struct {
             .kw_eq => try self.parseBinOp(rm, .kw_eq),
             .kw_call => blk: {
                 _ = self.advance();
-                const name = switch (self.advance()) {
-                    .ident => |s| s,
-                    .func => |s| s,
-                    else => return error.ExpectedFuncName,
-                };
+                const name = try self.parseFuncName();
                 break :blk try self.box(.{ .call = .{ .name = name, .args = try self.parseArgs(rm) } });
             },
             .kw_spawn => blk: {
                 _ = self.advance(); // consume 'spawn'
-                _ = try self.expectTag(.kw_call); // expect 'call'
-                const name = switch (self.advance()) {
-                    .ident => |s| s,
-                    .func => |s| s,
-                    else => return error.ExpectedFuncName,
-                };
+                _ = try self.expectTag(.kw_call);
+                const name = try self.parseFuncName();
                 break :blk try self.box(.{ .spawn = .{ .name = name, .args = try self.parseArgs(rm) } });
             },
             .kw_sync => blk: {
@@ -243,9 +259,19 @@ const Parser = struct {
                 const idx_expr = try self.parseExpr(rm);
                 break :blk try self.box(.{ .get_index_ref = .{ .arr = arr_idx, .idx = idx_expr } });
             },
+            .kw_cast => blk: {
+                _ = self.advance();
+                const ty = try self.parseTy();
+                const inner = try self.parseExpr(rm);
+                break :blk try self.box(.{ .cast = .{ .ty = ty, .expr = inner } });
+            },
             .int => |n| blk: {
                 _ = self.advance();
                 break :blk try self.box(.{ .int = n });
+            },
+            .float => |f| blk: {
+                _ = self.advance();
+                break :blk try self.box(.{ .float_lit = f });
             },
             .str => |s| blk: {
                 _ = self.advance();
@@ -334,11 +360,7 @@ const Parser = struct {
             },
             .kw_call => blk: {
                 _ = self.advance();
-                const name = switch (self.advance()) {
-                    .ident => |s| s,
-                    .func => |s| s,
-                    else => return error.ExpectedFuncName,
-                };
+                const name = try self.parseFuncName();
                 break :blk .{ .call = .{ .name = name, .args = try self.parseArgs(rm) } };
             },
             .kw_ret => blk: {
@@ -420,6 +442,7 @@ const Parser = struct {
         defer rm.deinit();
 
         var params: std.ArrayList(lexer.Param) = .empty;
+        errdefer params.deinit(self.alloc);
         if (std.meta.activeTag(self.peek()) == .lparen) {
             _ = self.advance();
             while (std.meta.activeTag(self.peek()) != .rparen) {
@@ -438,6 +461,10 @@ const Parser = struct {
         } else .void_;
         _ = try self.expectTag(.lbrace);
         var body: std.ArrayList(lexer.Stmt) = .empty;
+        errdefer {
+            for (body.items) |*s| s.deinit(self.alloc);
+            body.deinit(self.alloc);
+        }
         while (std.meta.activeTag(self.peek()) != .rbrace)
             try body.append(self.alloc, try self.parseStmt(&rm));
         _ = try self.expectTag(.rbrace);
@@ -452,7 +479,15 @@ const Parser = struct {
 
     fn parseProgram(self: *Parser) ParseError!lexer.Program {
         var structs: std.ArrayList(lexer.StructDef) = .empty;
+        errdefer {
+            for (structs.items) |*s| s.deinit(self.alloc);
+            structs.deinit(self.alloc);
+        }
         var functions: std.ArrayList(lexer.Function) = .empty;
+        errdefer {
+            for (functions.items) |*f| f.deinit(self.alloc);
+            functions.deinit(self.alloc);
+        }
         while (std.meta.activeTag(self.peek()) != .eof) {
             switch (self.peek()) {
                 .kw_struct => try structs.append(self.alloc, try self.parseStruct()),

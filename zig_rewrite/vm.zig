@@ -117,6 +117,12 @@ pub const Value = union(enum) {
     /// An integer value.
     int: i64,
 
+    /// Float (single precision stored as f64 for simplicity)
+    float_: f64,
+
+    /// Double precision float
+    double_: f64,
+
     /// Raw string value.
     str: []const u8,
 
@@ -221,7 +227,7 @@ const StructVal = struct {
 };
 
 const FileHandle = union(enum) { read: std.fs.File, write: std.fs.File };
-const BuiltinTag = enum(u8) { puts, open, read, write, close, flush };
+const BuiltinTag = enum(u8) { puts, open, read, write, close, flush, putf };
 const builtin_map = std.StaticStringMap(BuiltinTag).initComptime(.{
     .{ "puts", .puts },
     .{ "open", .open },
@@ -229,6 +235,7 @@ const builtin_map = std.StaticStringMap(BuiltinTag).initComptime(.{
     .{ "write", .write },
     .{ "close", .close },
     .{ "flush", .flush },
+    .{ "putf", .putf },
 });
 
 /// Pre-built label map for a function body (label name -> statement index).
@@ -252,11 +259,15 @@ pub const Vm = struct {
     /// Pre-built pc-indexed jump tables for each function (pc -> target pc for jmp/br_if)
     jump_tables: [][]i32,
 
+    /// File handles table
     files: std.ArrayListUnmanaged(?FileHandle),
+
     /// Heap-allocated structs (owned here, freed on deinit)
     heap_structs: std.ArrayListUnmanaged(*HeapStruct),
+
     /// Heap-allocated arrays (owned here, freed on deinit)
     heap_arrays: std.ArrayListUnmanaged(*HeapArray),
+
     /// Arenas (owned here, freed on deinit or arena_destroy)
     arenas: std.ArrayListUnmanaged(?*BearArena),
     alloc: std.mem.Allocator,
@@ -386,25 +397,43 @@ pub const Vm = struct {
                     continue;
                 },
                 .add => |op| {
-                    const a = try self.evalExprFast(op.a, env);
-                    const b = try self.evalExprFast(op.b, env);
-                    return .{ .int = a +% b };
+                    const a = try self.evalExpr(op.a, env);
+                    const b = try self.evalExpr(op.b, env);
+                    return switch (a) {
+                        .float_ => |fa| .{ .float_ = fa + b.float_ },
+                        .double_ => |fa| .{ .double_ = fa + b.double_ },
+                        else => .{ .int = a.int +% b.int },
+                    };
                 },
                 .sub => |op| {
-                    const a = try self.evalExprFast(op.a, env);
-                    const b = try self.evalExprFast(op.b, env);
-                    return .{ .int = a -% b };
+                    const a = try self.evalExpr(op.a, env);
+                    const b = try self.evalExpr(op.b, env);
+                    return switch (a) {
+                        .float_ => |fa| .{ .float_ = fa - b.float_ },
+                        .double_ => |fa| .{ .double_ = fa - b.double_ },
+                        else => .{ .int = a.int -% b.int },
+                    };
                 },
                 .mul => |op| {
-                    const a = try self.evalExprFast(op.a, env);
-                    const b = try self.evalExprFast(op.b, env);
-                    return .{ .int = a *% b };
+                    const a = try self.evalExpr(op.a, env);
+                    const b = try self.evalExpr(op.b, env);
+                    return switch (a) {
+                        .float_ => |fa| .{ .float_ = fa * b.float_ },
+                        .double_ => |fa| .{ .double_ = fa * b.double_ },
+                        else => .{ .int = a.int *% b.int },
+                    };
                 },
                 .div => |op| {
-                    const b = try self.evalExprFast(op.b, env);
-                    if (b == 0) return error.DivisionByZero;
-                    const a = try self.evalExprFast(op.a, env);
-                    return .{ .int = @divTrunc(a, b) };
+                    const a = try self.evalExpr(op.a, env);
+                    const b = try self.evalExpr(op.b, env);
+                    return switch (a) {
+                        .float_ => |fa| .{ .float_ = fa / b.float_ },
+                        .double_ => |fa| .{ .double_ = fa / b.double_ },
+                        else => blk: {
+                            if (b.int == 0) return error.DivisionByZero;
+                            break :blk .{ .int = @divTrunc(a.int, b.int) };
+                        },
+                    };
                 },
                 .lt => |op| {
                     const a = try self.evalExprFast(op.a, env);
@@ -602,6 +631,31 @@ pub const Vm = struct {
                     return .{ .arena_ptr = buf };
                 },
                 .phi => return error.PhiWithNoPredecessor,
+                .float_lit => |f| return .{ .float_ = f },
+                .cast => |c| {
+                    const v = try self.evalExpr(c.expr, env);
+                    return switch (c.ty) {
+                        .int => switch (v) {
+                            .float_ => |f| .{ .int = @intFromFloat(f) },
+                            .double_ => |f| .{ .int = @intFromFloat(f) },
+                            .int => v,
+                            else => return error.InvalidCast,
+                        },
+                        .float_ => switch (v) {
+                            .int => |n| .{ .float_ = @floatFromInt(n) },
+                            .float_ => v,
+                            .double_ => |f| .{ .float_ = @floatCast(f) },
+                            else => return error.InvalidCast,
+                        },
+                        .double_ => switch (v) {
+                            .int => |n| .{ .double_ = @floatFromInt(n) },
+                            .float_ => |f| .{ .double_ = @floatCast(f) },
+                            .double_ => v,
+                            else => return error.InvalidCast,
+                        },
+                        else => return error.InvalidCast,
+                    };
+                },
             }
         }
     }
@@ -625,6 +679,8 @@ pub const Vm = struct {
         var tmp: [64]u8 = undefined;
         switch (val) {
             .int => |n| bear_io.writeStdout(std.fmt.bufPrint(&tmp, "{d}\n", .{n}) catch return),
+            .float_ => |f| bear_io.writeStdout(std.fmt.bufPrint(&tmp, "{d}\n", .{f}) catch return),
+            .double_ => |f| bear_io.writeStdout(std.fmt.bufPrint(&tmp, "{d}\n", .{f}) catch return),
             .str => |s| {
                 bear_io.writeStdout(s);
                 bear_io.writeStdout("\n");
@@ -744,6 +800,10 @@ pub const Vm = struct {
                 bear_io.flushStdout();
                 break :blk .void_;
             },
+            .putf => blk: {
+                for (args) |a| self.printValue(a);
+                break :blk .void_;
+            },
         };
     }
 
@@ -802,12 +862,9 @@ pub const Vm = struct {
                         else => return error.NotAPointer,
                     };
                     const val = try self.evalExpr(s.expr, env);
-                    // If this ref points into a HeapStruct sentinel cell, handle struct store
                     const is_struct_sentinel = blk: {
                         for (self.heap_arrays.items) |ha| {
                             if (ha.cells.len == 1 and &ha.cells[0] == cell) {
-                                // This is a struct sentinel — store a struct_lit into it
-                                // by unpacking the struct_lit value into the HeapStruct fields
                                 const hs: *HeapStruct = @ptrFromInt(@as(usize, @intCast(cell.value.int)));
                                 switch (val) {
                                     .struct_ => |sv| {

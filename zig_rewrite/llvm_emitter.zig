@@ -189,7 +189,6 @@ const Emitter = struct {
                 return .{ .tmp = ptr };
             },
             .call => |c| return self.emitCallExpr(c.name, c.args.items, env),
-            // spawn/sync: not supported in LLVM backend, treat spawn as a plain call
             .spawn => |sp| return self.emitCallExpr(sp.name, sp.args.items, env),
             .sync => |r| return env[r],
             .phi => |arms| {
@@ -210,6 +209,35 @@ const Emitter = struct {
             },
             .free, .arena_create, .arena_alloc,
             .alloc_type, .alloc_array, .load, .get_field_ref, .get_index_ref => return error.UnsupportedExpr,
+            .float_lit => |f| {
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                var buf: [64]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, " = fadd float 0.0, {d}\n", .{f}) catch unreachable;
+                try self.out.appendSlice(self.alloc, s);
+                return .{ .tmp = t };
+            },
+            .cast => |c| {
+                const v = try self.emitExpr(c.expr, env);
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                switch (c.ty) {
+                    .int => try self.out.appendSlice(self.alloc, " = fptosi float "),
+                    .float_ => try self.out.appendSlice(self.alloc, " = fpext float "),
+                    .double_ => try self.out.appendSlice(self.alloc, " = fpext float "),
+                    else => return error.UnsupportedCast,
+                }
+                try self.writeSlot(v);
+                switch (c.ty) {
+                    .int => try self.out.appendSlice(self.alloc, " to i64\n"),
+                    .float_ => try self.out.appendSlice(self.alloc, " to float\n"),
+                    .double_ => try self.out.appendSlice(self.alloc, " to double\n"),
+                    else => unreachable,
+                }
+                return .{ .tmp = t };
+            },
         }
     }
 

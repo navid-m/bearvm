@@ -78,6 +78,8 @@ const Emitter = struct {
         return switch (ty) {
             .int, .bool_ => 'w',
             .str, .named => 'l',
+            .float_ => 's',
+            .double_ => 'd',
             .void_ => 0,
         };
     }
@@ -198,9 +200,7 @@ const Emitter = struct {
                 return .{ .tmp = ptr };
             },
             .call => |c| return self.emitCallExpr(c.name, c.args.items, env),
-            // spawn: treat as a plain call (no async runtime in QBE backend)
             .spawn => |sp| return self.emitCallExpr(sp.name, sp.args.items, env),
-            // sync: the value is already in the register
             .sync => |r| return env[r],
             .free => |ptr_reg| {
                 const t = self.fresh();
@@ -225,7 +225,8 @@ const Emitter = struct {
                 }
                 try self.out.append(self.alloc, '\n');
                 return .{ .tmp = t };
-            },            .arena_create => {
+            },
+            .arena_create => {
                 const t = self.fresh();
                 try self.out.appendSlice(self.alloc, "  ");
                 try self.writeTmp(t);
@@ -245,6 +246,30 @@ const Emitter = struct {
                 return .{ .tmp = t };
             },
             .alloc_type, .alloc_array, .load, .get_field_ref, .get_index_ref => return error.UnsupportedExpr,
+            .float_lit => |f| {
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                var buf: [48]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, " =s copy s_{d}\n", .{f}) catch unreachable;
+                try self.out.appendSlice(self.alloc, s);
+                return .{ .tmp = t };
+            },
+            .cast => |c| {
+                const v = try self.emitExpr(c.expr, env);
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                switch (c.ty) {
+                    .int => try self.out.appendSlice(self.alloc, " =w stosi "),
+                    .float_ => try self.out.appendSlice(self.alloc, " =s exts "),
+                    .double_ => try self.out.appendSlice(self.alloc, " =d exts "),
+                    else => return error.UnsupportedCast,
+                }
+                try self.writeSlot(v);
+                try self.out.append(self.alloc, '\n');
+                return .{ .tmp = t };
+            },
         }
     }
 

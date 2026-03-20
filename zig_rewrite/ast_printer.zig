@@ -140,6 +140,19 @@ const Printer = struct {
                 defer alloc.free(cp);
                 try self.printExpr(alloc, aa.size, cp, true, depth + 1);
             },
+            .float_lit => |f| {
+                const label = try std.fmt.allocPrint(alloc, "float({d})", .{f});
+                defer alloc.free(label);
+                self.node(prefix, is_last, depth, label);
+            },
+            .cast => |c| {
+                const label = try std.fmt.allocPrint(alloc, "cast({s})", .{@tagName(c.ty)});
+                defer alloc.free(label);
+                self.node(prefix, is_last, depth, label);
+                const cp = try childPrefix(alloc, prefix, is_last);
+                defer alloc.free(cp);
+                try self.printExpr(alloc, c.expr, cp, true, depth + 1);
+            },
             .phi => |arms| {
                 self.node(prefix, is_last, depth, "phi");
                 const cp = try childPrefix(alloc, prefix, is_last);
@@ -330,6 +343,8 @@ fn tyName(ty: lexer.Ty) []const u8 {
         .str => "string",
         .bool_ => "bool",
         .named => "named",
+        .float_ => "float",
+        .double_ => "double",
     };
 }
 

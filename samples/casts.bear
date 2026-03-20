@@ -1,0 +1,49 @@
+@fib(%n: int): int {
+entry:
+    %a0 = const 0
+    %b0 = const 1
+    %i0 = const 0
+    jmp loop_cond
+
+loop_cond:
+    %cond0 = lt %i0, %n
+    br_if %cond0, loop_body, loop_end
+
+loop_body:
+    %tmp0 = add %a0, %b0
+    %a1 = %b0
+    %b1 = %tmp0
+    %i1 = add %i0, 1
+
+    %a0 = %a1
+    %b0 = %b1
+    %i0 = %i1
+    jmp loop_cond
+
+loop_end:
+    ret %a0
+}
+
+@float_example(): float {
+entry:
+    %f1 = const 3.14: float
+    %f2 = const 2.0: float
+    %sum = add %f1, %f2
+    %dbl = cast double %sum
+    %back_to_float = cast float %dbl
+    ret %back_to_float
+}
+
+@main(): int {
+entry:
+    %n = const 10
+    %fib_result = call fib(%n)
+    call puts(%fib_result)
+
+    %f_result = call float_example()
+    call putf(%f_result)
+    %int_from_float = cast int %f_result
+    call puts(%int_from_float)
+    call flush()
+    ret 0
+}

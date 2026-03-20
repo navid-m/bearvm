@@ -3,6 +3,7 @@ const bear_main = @import("bear.zig");
 
 pub const TokenTag = enum(u8) {
     int,
+    float,
     str,
     ident,
     reg,
@@ -37,10 +38,13 @@ pub const TokenTag = enum(u8) {
     kw_arena_alloc,
     kw_arena_destroy,
     kw_phi,
+    kw_cast,
     ty_int,
     ty_void,
     ty_string,
     ty_bool,
+    ty_float,
+    ty_double,
     lbrace,
     rbrace,
     lparen,
@@ -56,6 +60,7 @@ pub const TokenTag = enum(u8) {
 
 pub const Token = union(TokenTag) {
     int: i64,
+    float: f64,
     str: []const u8,
     ident: []const u8,
     reg: []const u8,
@@ -90,10 +95,13 @@ pub const Token = union(TokenTag) {
     kw_arena_alloc,
     kw_arena_destroy,
     kw_phi,
+    kw_cast,
     ty_int,
     ty_void,
     ty_string,
     ty_bool,
+    ty_float,
+    ty_double,
     lbrace,
     rbrace,
     lparen,
@@ -140,10 +148,13 @@ pub fn keywordToken(word: []const u8) ?Token {
         .{ "arena_alloc", Token.kw_arena_alloc },
         .{ "arena_destroy", Token.kw_arena_destroy },
         .{ "phi", Token.kw_phi },
+        .{ "cast", Token.kw_cast },
         .{ "int", Token.ty_int },
         .{ "void", Token.ty_void },
         .{ "string", Token.ty_string },
         .{ "bool", Token.ty_bool },
+        .{ "float", Token.ty_float },
+        .{ "double", Token.ty_double },
     };
     inline for (kws) |kw| {
         if (std.mem.eql(u8, word, kw[0])) return kw[1];
@@ -266,8 +277,15 @@ pub fn tokenize(src: []const u8, alloc: std.mem.Allocator) !std.ArrayList(Token)
                     if (neg) i += 1;
                     const start = i;
                     while (i < src.len and std.ascii.isDigit(src[i])) i += 1;
-                    const n = try std.fmt.parseInt(i64, src[start..i], 10);
-                    try tokens.append(alloc, .{ .int = if (neg) -n else n });
+                    if (i < src.len and src[i] == '.') {
+                        i += 1;
+                        while (i < src.len and std.ascii.isDigit(src[i])) i += 1;
+                        const f = try std.fmt.parseFloat(f64, src[start - @as(usize, if (neg) 1 else 0) .. i]);
+                        try tokens.append(alloc, .{ .float = f });
+                    } else {
+                        const n = try std.fmt.parseInt(i64, src[start..i], 10);
+                        try tokens.append(alloc, .{ .int = if (neg) -n else n });
+                    }
                 } else if (std.ascii.isAlphabetic(c) or c == '_') {
                     const start = i;
                     while (i < src.len and (std.ascii.isAlphanumeric(src[i]) or src[i] == '_')) i += 1;
@@ -281,7 +299,7 @@ pub fn tokenize(src: []const u8, alloc: std.mem.Allocator) !std.ArrayList(Token)
     return tokens;
 }
 
-pub const Ty = enum { int, void_, str, bool_, named };
+pub const Ty = enum { int, void_, str, bool_, named, float_, double_ };
 pub const StructDef = struct {
     name: []const u8,
     fields: std.ArrayListUnmanaged(StructField),
@@ -380,6 +398,8 @@ pub const Expr = union(enum) {
     arena_create,
     arena_alloc: struct { arena: RegIdx, size: *Expr },
     phi: std.ArrayListUnmanaged(PhiArm),
+    float_lit: f64,
+    cast: struct { ty: Ty, expr: *Expr },
 };
 
 pub const ExprSlab = struct {
