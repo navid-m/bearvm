@@ -173,6 +173,11 @@ pub const Value = union(enum) {
             else => unreachable,
         };
     }
+
+    /// Fast integer check
+    pub inline fn isInt(self: Value) bool {
+        return self == .int;
+    }
 };
 
 /// A single heap-allocated value cell, used as the target of a `ref`.
@@ -399,6 +404,9 @@ pub const Vm = struct {
                 .add => |op| {
                     const a = try self.evalExpr(op.a, env);
                     const b = try self.evalExpr(op.b, env);
+                    if (a.isInt() and b.isInt()) {
+                        return .{ .int = a.int +% b.int };
+                    }
                     return switch (a) {
                         .float_ => |fa| .{ .float_ = fa + b.float_ },
                         .double_ => |fa| .{ .double_ = fa + b.double_ },
@@ -811,7 +819,8 @@ pub const Vm = struct {
         var pc: usize = 0;
         var prev_label: ?[]const u8 = null;
         var cur_label: ?[]const u8 = null;
-        while (pc < stmts.len) {
+        const len = stmts.len;
+        while (pc < len) {
             switch (stmts[pc]) {
                 .assign => |a| {
                     env[a.reg] = try self.evalExprWithPrev(a.expr, env, prev_label);
