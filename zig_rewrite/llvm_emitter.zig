@@ -785,13 +785,15 @@ const Emitter = struct {
             @tagName(builtin.target.os.tag),
             @tagName(builtin.target.abi),
         });
+        defer self.alloc.free(platform);
 
         const header = try std.fmt.allocPrint(self.alloc, "; Bear LLVM IR\ntarget triple = \"{s}\"\n\n", .{platform});
+        defer self.alloc.free(header);
+
         try self.out.appendSlice(self.alloc, header);
         try self.emitDeclarations();
         try self.emitDataSection();
         try self.out.appendSlice(self.alloc, func_text);
-        defer self.alloc.free(platform);
         return try self.out.toOwnedSlice(self.alloc);
     }
 };
