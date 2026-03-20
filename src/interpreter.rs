@@ -45,9 +45,10 @@ impl StdoutBuf {
 }
 
 /// Stack frame — uses a fixed-size array for small functions to avoid heap allocation.
+/// Only the first `n` slots are initialized; the rest are left as MaybeUninit.
 const SMALL_FRAME: usize = 64;
 enum Frame {
-    Small(Box<[Value; SMALL_FRAME]>, usize),
+    Small([std::mem::MaybeUninit<Value>; SMALL_FRAME], usize),
     Heap(Vec<Value>),
 }
 
@@ -55,8 +56,11 @@ impl Frame {
     #[inline]
     fn new(n: usize) -> Self {
         if n <= SMALL_FRAME {
-            let arr = vec![Value::Void; SMALL_FRAME].into_boxed_slice();
-            let arr = unsafe { Box::from_raw(Box::into_raw(arr) as *mut [Value; SMALL_FRAME]) };
+            let mut arr: [std::mem::MaybeUninit<Value>; SMALL_FRAME] =
+                unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+            for slot in &mut arr[..n] {
+                slot.write(Value::Void);
+            }
             Frame::Small(arr, n)
         } else {
             Frame::Heap(vec![Value::Void; n])
@@ -66,21 +70,46 @@ impl Frame {
     #[inline(always)]
     fn as_slice_mut(&mut self) -> &mut [Value] {
         match self {
-            Frame::Small(arr, n) => &mut arr[..*n],
+            Frame::Small(arr, n) => unsafe {
+                std::slice::from_raw_parts_mut(arr.as_mut_ptr() as *mut Value, *n)
+            },
             Frame::Heap(v) => v.as_mut_slice(),
+        }
+    }
+}
+
+impl Drop for Frame {
+    fn drop(&mut self) {
+        if let Frame::Small(arr, n) = self {
+            for slot in &mut arr[..*n] {
+                unsafe { slot.assume_init_drop() };
+            }
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum Value {
+    /// Some integer value.
     Int(i64),
+
+    /// Some unbounded string value.
     Str(String),
+
+    /// Some boolean value.
     Bool(bool),
+
+    /// Some pointer.
     Ptr(Vec<u8>),
+
+    /// A file handle.
     File(i64),
+
+    /// A void value (nothing).
     Void,
-    Struct(String, FxHashMap<String, Value>),
+
+    /// Boxed to keep Value at 32 bytes — avoids bloating every frame slot.
+    Struct(Box<(String, FxHashMap<String, Value>)>),
 }
 
 impl std::fmt::Display for Value {
@@ -92,7 +121,8 @@ impl std::fmt::Display for Value {
             Value::Ptr(_) => write!(f, "<ptr>"),
             Value::File(fd) => write!(f, "<fd:{fd}>"),
             Value::Void => write!(f, ""),
-            Value::Struct(name, fields) => {
+            Value::Struct(b) => {
+                let (name, fields) = b.as_ref();
                 write!(f, "{name} {{")?;
                 for (k, v) in fields {
                     write!(f, " {k}: {v}")?;
@@ -202,8 +232,8 @@ impl<'a> Vm<'a> {
                 self.stdout.write(b">\n");
             }
             Value::Void => {}
-            Value::Struct(name, _) => {
-                self.stdout.write(name.as_bytes());
+            Value::Struct(b) => {
+                self.stdout.write(b.0.as_bytes());
                 self.stdout.write(b" { ... }\n");
             }
         }
@@ -234,10 +264,11 @@ impl<'a> Vm<'a> {
             Expr::Str(s) => Ok(Value::Str(s.clone())),
             Expr::Reg(r) => Ok(unsafe { env.get_unchecked(*r as usize) }.clone()),
             Expr::Field(r, field) => match unsafe { env.get_unchecked(*r as usize) } {
-                Value::Struct(_, fields) => fields
-                    .get(field)
-                    .cloned()
-                    .ok_or_else(|| format!("No field '{field}'")),
+                Value::Struct(b) => {
+                    b.1.get(field)
+                        .cloned()
+                        .ok_or_else(|| format!("No field '{field}'"))
+                }
                 v => Err(format!("not a struct (got {v:?})")),
             },
             Expr::Const(inner) => self.eval_expr(inner, env),
@@ -281,7 +312,7 @@ impl<'a> Vm<'a> {
                     let val = self.eval_expr(fexpr, env)?;
                     fields.insert(fname.clone(), val);
                 }
-                Ok(Value::Struct(name.clone(), fields))
+                Ok(Value::Struct(Box::new((name.clone(), fields))))
             }
             Expr::Named(name) => match name.as_str() {
                 "READ" => Ok(Value::Int(0)),
@@ -355,7 +386,6 @@ impl<'a> Vm<'a> {
                 for a in args {
                     self.print_value(a);
                 }
-                self.stdout.flush();
                 Ok(Value::Void)
             }
             Builtin::Flush => {
@@ -457,8 +487,8 @@ impl<'a> Vm<'a> {
             Stmt::SetField(reg, field, expr) => {
                 let val = self.eval_expr(expr, env)?;
                 match unsafe { env.get_unchecked_mut(*reg as usize) } {
-                    Value::Struct(_, fields) => {
-                        fields.insert(field.clone(), val);
+                    Value::Struct(b) => {
+                        b.1.insert(field.clone(), val);
                     }
                     _ => return Err(format!("set: register is not a struct")),
                 }
