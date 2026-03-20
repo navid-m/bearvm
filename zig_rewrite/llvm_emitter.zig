@@ -2,6 +2,7 @@
 //! LLVM IR reference: https://llvm.org/docs/LangRef.html
 
 const std = @import("std");
+const builtin = @import("builtin");
 const lexer = @import("lexer.zig");
 
 const TmpId = u32;
@@ -399,11 +400,7 @@ const Emitter = struct {
         try self.out.appendSlice(self.alloc, "  ");
         try self.writeTmp(t);
         if (self.slotIsFloat(av) or self.slotIsFloat(bv)) {
-            const float_op: []const u8 = if (std.mem.indexOf(u8, op, "add") != null) " = fadd double "
-                else if (std.mem.indexOf(u8, op, "sub") != null) " = fsub double "
-                else if (std.mem.indexOf(u8, op, "mul") != null) " = fmul double "
-                else if (std.mem.indexOf(u8, op, "div") != null) " = fdiv double "
-                else op;
+            const float_op: []const u8 = if (std.mem.indexOf(u8, op, "add") != null) " = fadd double " else if (std.mem.indexOf(u8, op, "sub") != null) " = fsub double " else if (std.mem.indexOf(u8, op, "mul") != null) " = fmul double " else if (std.mem.indexOf(u8, op, "div") != null) " = fdiv double " else op;
             try self.out.appendSlice(self.alloc, float_op);
             try self.writeSlot(av);
             try self.out.appendSlice(self.alloc, ", ");
@@ -464,9 +461,7 @@ const Emitter = struct {
         }
         const callee_ret = self.func_ret_tys.get(name);
         const is_float_ret = callee_ret != null and (callee_ret.? == .float_ or callee_ret.? == .double_);
-        const ret_ty: []const u8 = if (std.mem.eql(u8, name, "puts")) "i32"
-            else if (is_float_ret) "double"
-            else "i64";
+        const ret_ty: []const u8 = if (std.mem.eql(u8, name, "puts")) "i32" else if (is_float_ret) "double" else "i64";
         const t = self.fresh();
         try self.out.appendSlice(self.alloc, "  ");
         try self.writeTmp(t);
@@ -478,9 +473,7 @@ const Emitter = struct {
         for (0..argc) |i| {
             if (i > 0) try self.out.appendSlice(self.alloc, ", ");
             const slot = slots_buf[i];
-            const arg_ty: []const u8 = if (is_ptr_buf[i]) "ptr"
-                else if (self.slotIsFloat(slot)) "double"
-                else "i64";
+            const arg_ty: []const u8 = if (is_ptr_buf[i]) "ptr" else if (self.slotIsFloat(slot)) "double" else "i64";
             try self.out.appendSlice(self.alloc, arg_ty);
             try self.out.append(self.alloc, ' ');
             try self.writeSlot(slot);
@@ -713,11 +706,18 @@ const Emitter = struct {
         defer self.alloc.free(func_text);
         self.out.items.len = func_start;
 
-        try self.out.appendSlice(self.alloc, "; Bear LLVM IR\ntarget triple = \"x86_64-unknown-linux-gnu\"\n\n");
+        const platform = try std.fmt.allocPrint(self.alloc, "{s}-{s}-{s}", .{
+            @tagName(builtin.target.cpu.arch),
+            @tagName(builtin.target.os.tag),
+            @tagName(builtin.target.abi),
+        });
+
+        const header = try std.fmt.allocPrint(self.alloc, "; Bear LLVM IR\ntarget triple = \"{s}\"\n\n", .{platform});
+        try self.out.appendSlice(self.alloc, header);
         try self.emitDeclarations();
         try self.emitDataSection();
         try self.out.appendSlice(self.alloc, func_text);
-
+        defer self.alloc.free(platform);
         return try self.out.toOwnedSlice(self.alloc);
     }
 };

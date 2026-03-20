@@ -195,7 +195,7 @@ fn runLlvm(program: *const bear_lexer.Program, path: []const u8, compile: bool, 
     };
 
     const rt_path = writeRuntime(alloc);
-    runCmd(alloc, &.{ "clang", ir_path, rt_path, "-o", out_path }, "clang");
+    runCmd(alloc, &.{ "clang", ir_path, rt_path, "-o", out_path, "-Wno-override-module" }, "clang");
     std.debug.print("Compiled to {s}\n", .{out_path});
 }
 
