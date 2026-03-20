@@ -114,15 +114,32 @@ pub fn run(program: *const lexer.Program, alloc: std.mem.Allocator) !void {
 }
 
 pub const Value = union(enum) {
+    /// An integer value.
     int: i64,
+
+    /// Raw string value.
     str: []const u8,
+
+    /// Boolean bit.
     bool_: bool,
+
+    /// Heap-allocated raw buffer — owned by the VM, freed on deinit/free.
     ptr: []u8,
+
+    /// Arena-allocated raw buffer — owned by a BearArena, NOT freed individually.
+    arena_ptr: []u8,
+
     /// A typed pointer — references a heap-allocated Value cell.
     /// Used by get_field_ref / get_index_ref / alloc_type / alloc_array.
     ref: *HeapCell,
+
+    /// File handle.
     file: i64,
+
+    /// Nothing.
     void_,
+
+    /// Structure value.
     struct_: StructVal,
 
     pub fn deinit(self: *Value, alloc: std.mem.Allocator) void {
@@ -133,7 +150,6 @@ pub const Value = union(enum) {
                 while (it.next()) |entry| entry.value_ptr.deinit(alloc);
                 sv.fields.deinit();
             },
-            // HeapCells are owned by their parent HeapStruct/HeapArray; don't free here.
             else => {},
         }
     }
@@ -583,7 +599,7 @@ pub const Vm = struct {
                     const n: usize = @intCast((try self.evalExpr(aa.size, env)).int);
                     const buf = try arena.allocator().alloc(u8, n);
                     @memset(buf, 0);
-                    return .{ .ptr = buf };
+                    return .{ .arena_ptr = buf };
                 },
                 .phi => return error.PhiWithNoPredecessor,
             }
@@ -615,6 +631,7 @@ pub const Vm = struct {
             },
             .bool_ => |b| bear_io.writeStdout(if (b) "true\n" else "false\n"),
             .ptr => bear_io.writeStdout("<ptr>\n"),
+            .arena_ptr => bear_io.writeStdout("<arena_ptr>\n"),
             .ref => bear_io.writeStdout("<ref>\n"),
             .file => |fd| bear_io.writeStdout(std.fmt.bufPrint(&tmp, "<fd:{d}>\n", .{fd}) catch return),
             .void_ => {},
@@ -701,6 +718,7 @@ pub const Vm = struct {
                 const data: []const u8 = switch (args[1]) {
                     .str => |s| s,
                     .ptr => |p| p,
+                    .arena_ptr => |p| p,
                     else => return error.TypeMismatch,
                 };
                 switch (self.files.items[fd].?) {

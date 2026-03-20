@@ -583,3 +583,340 @@ test "interpreter: undefined register is error" {
         evalMain("@main(): int { %v = %nope.field ret 0 }", alloc),
     );
 }
+
+test "lexer: free and arena keywords" {
+    const alloc = std.testing.allocator;
+    const toks = try testLex("free arena_create arena_alloc arena_destroy", alloc);
+    defer alloc.free(toks);
+    try std.testing.expectEqual(bear_lexer.TokenTag.kw_free, std.meta.activeTag(toks[0]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.kw_arena_create, std.meta.activeTag(toks[1]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.kw_arena_alloc, std.meta.activeTag(toks[2]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.kw_arena_destroy, std.meta.activeTag(toks[3]));
+}
+
+test "lexer: phi keyword and brackets" {
+    const alloc = std.testing.allocator;
+    const toks = try testLex("phi [ ]", alloc);
+    defer alloc.free(toks);
+    try std.testing.expectEqual(bear_lexer.TokenTag.kw_phi, std.meta.activeTag(toks[0]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.lbracket, std.meta.activeTag(toks[1]));
+    try std.testing.expectEqual(bear_lexer.TokenTag.rbracket, std.meta.activeTag(toks[2]));
+}
+
+test "parser: free stmt" {
+    const alloc = std.testing.allocator;
+    var prog = try testParse("@main(): int { %buf = alloc 64 free %buf ret 0 }", alloc);
+    defer prog.deinit(alloc);
+    const stmts = prog.functions.items[0].body.items;
+    try std.testing.expect(std.meta.activeTag(stmts[1]) == .free);
+}
+
+test "parser: arena_create and arena_destroy" {
+    const alloc = std.testing.allocator;
+    var prog = try testParse("@main(): int { %a = arena_create arena_destroy %a ret 0 }", alloc);
+    defer prog.deinit(alloc);
+    const stmts = prog.functions.items[0].body.items;
+    try std.testing.expect(std.meta.activeTag(stmts[0].assign.expr.*) == .arena_create);
+    try std.testing.expect(std.meta.activeTag(stmts[1]) == .arena_destroy);
+}
+
+test "parser: arena_alloc expr" {
+    const alloc = std.testing.allocator;
+    var prog = try testParse("@main(): int { %a = arena_create %p = arena_alloc %a, 128 ret 0 }", alloc);
+    defer prog.deinit(alloc);
+    const stmts = prog.functions.items[0].body.items;
+    const expr = stmts[1].assign.expr;
+    try std.testing.expect(std.meta.activeTag(expr.*) == .arena_alloc);
+}
+
+test "parser: alloc_array expr" {
+    const alloc = std.testing.allocator;
+    var prog = try testParse("@main(): int { %arr = alloc_array int, 10 ret 0 }", alloc);
+    defer prog.deinit(alloc);
+    const expr = prog.functions.items[0].body.items[0].assign.expr;
+    try std.testing.expect(std.meta.activeTag(expr.*) == .alloc_array);
+    try std.testing.expectEqual(bear_lexer.Ty.int, expr.alloc_array.elem_ty);
+}
+
+test "parser: phi expr" {
+    const alloc = std.testing.allocator;
+    var prog = try testParse(
+        \\@main(): int {
+        \\  entry:
+        \\  %x0 = const 0
+        \\  jmp loop
+        \\  loop:
+        \\  %x = phi [entry: %x0, loop: %x0]
+        \\  ret %x
+        \\}
+    , alloc);
+    defer prog.deinit(alloc);
+    const stmts = prog.functions.items[0].body.items;
+    var found = false;
+    for (stmts) |s| {
+        if (s == .assign and std.meta.activeTag(s.assign.expr.*) == .phi) {
+            try std.testing.expectEqual(@as(usize, 2), s.assign.expr.phi.items.len);
+            try std.testing.expectEqualStrings("entry", s.assign.expr.phi.items[0].label);
+            try std.testing.expectEqualStrings("loop", s.assign.expr.phi.items[1].label);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "interpreter: alloc and free raw buffer" {
+    const alloc = std.testing.allocator;
+    const v = try evalMain("@main(): int { %buf = alloc 256 free %buf ret 0 }", alloc);
+    try std.testing.expectEqual(@as(i64, 0), v.int);
+}
+
+test "interpreter: alloc typed struct and free" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\struct Node { val: int }
+        \\@main(): int {
+        \\  %p = alloc Node
+        \\  %ref = get_field_ref %p, val
+        \\  store %ref, 99
+        \\  %v = load %ref
+        \\  free %p
+        \\  ret %v
+        \\}
+    ;
+    const v = try evalMain(src, alloc);
+    try std.testing.expectEqual(@as(i64, 99), v.int);
+}
+
+test "interpreter: alloc_array and index access" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\@main(): int {
+        \\  %arr = alloc_array int, 4
+        \\  %r2 = get_index_ref %arr, 2
+        \\  store %r2, 42
+        \\  %v = load %r2
+        \\  ret %v
+        \\}
+    ;
+    const v = try evalMain(src, alloc);
+    try std.testing.expectEqual(@as(i64, 42), v.int);
+}
+
+test "interpreter: alloc_array out of bounds is error" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\@main(): int {
+        \\  %arr = alloc_array int, 2
+        \\  %r = get_index_ref %arr, 5
+        \\  ret 0
+        \\}
+    ;
+    try std.testing.expectError(error.IndexOutOfBounds, evalMain(src, alloc));
+}
+
+test "interpreter: arena create, alloc, destroy" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\@main(): int {
+        \\  %arena = arena_create
+        \\  %a = arena_alloc %arena, 64
+        \\  %b = arena_alloc %arena, 128
+        \\  arena_destroy %arena
+        \\  ret 0
+        \\}
+    ;
+    const v = try evalMain(src, alloc);
+    try std.testing.expectEqual(@as(i64, 0), v.int);
+}
+
+test "interpreter: multiple arenas independent" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\@main(): int {
+        \\  %a1 = arena_create
+        \\  %a2 = arena_create
+        \\  %p1 = arena_alloc %a1, 32
+        \\  %p2 = arena_alloc %a2, 64
+        \\  arena_destroy %a1
+        \\  arena_destroy %a2
+        \\  ret 0
+        \\}
+    ;
+    const v = try evalMain(src, alloc);
+    try std.testing.expectEqual(@as(i64, 0), v.int);
+}
+
+test "interpreter: phi selects entry arm" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\@main(): int {
+        \\  entry:
+        \\  %x0 = const 7
+        \\  %y0 = const 99
+        \\  jmp done
+        \\  other:
+        \\  jmp done
+        \\  done:
+        \\  %x = phi [entry: %x0, other: %y0]
+        \\  ret %x
+        \\}
+    ;
+    const v = try evalMain(src, alloc);
+    try std.testing.expectEqual(@as(i64, 7), v.int);
+}
+
+test "interpreter: phi selects other arm" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\@main(): int {
+        \\  entry:
+        \\  %x0 = const 7
+        \\  %y0 = const 99
+        \\  %cond = const 1
+        \\  br_if %cond, other, done
+        \\  other:
+        \\  jmp done
+        \\  done:
+        \\  %x = phi [entry: %x0, other: %y0]
+        \\  ret %x
+        \\}
+    ;
+    const v = try evalMain(src, alloc);
+    try std.testing.expectEqual(@as(i64, 99), v.int);
+}
+
+test "interpreter: phi fibonacci fib(10) = 55" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\@fib(%n: int): int {
+        \\  entry:
+        \\  %a0 = const 0
+        \\  %b0 = const 1
+        \\  %i0 = const 0
+        \\  jmp loop_cond
+        \\  loop_cond:
+        \\  %a = phi [entry: %a0, loop_body: %a_next]
+        \\  %b = phi [entry: %b0, loop_body: %b_next]
+        \\  %i = phi [entry: %i0, loop_body: %i_next]
+        \\  %cond = lt %i, %n
+        \\  br_if %cond, loop_body, loop_end
+        \\  loop_body:
+        \\  %tmp = add %a, %b
+        \\  %a_next = %b
+        \\  %b_next = %tmp
+        \\  %i_next = add %i, 1
+        \\  jmp loop_cond
+        \\  loop_end:
+        \\  ret %a
+        \\}
+        \\@main(): int {
+        \\  %r = call fib(10)
+        \\  ret %r
+        \\}
+    ;
+    const v = try evalMain(src, alloc);
+    try std.testing.expectEqual(@as(i64, 55), v.int);
+}
+
+test "interpreter: phi fibonacci fib(0) = 0" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\@fib(%n: int): int {
+        \\  entry:
+        \\  %a0 = const 0
+        \\  %b0 = const 1
+        \\  %i0 = const 0
+        \\  jmp loop_cond
+        \\  loop_cond:
+        \\  %a = phi [entry: %a0, loop_body: %a_next]
+        \\  %b = phi [entry: %b0, loop_body: %b_next]
+        \\  %i = phi [entry: %i0, loop_body: %i_next]
+        \\  %cond = lt %i, %n
+        \\  br_if %cond, loop_body, loop_end
+        \\  loop_body:
+        \\  %tmp = add %a, %b
+        \\  %a_next = %b
+        \\  %b_next = %tmp
+        \\  %i_next = add %i, 1
+        \\  jmp loop_cond
+        \\  loop_end:
+        \\  ret %a
+        \\}
+        \\@main(): int {
+        \\  %r = call fib(0)
+        \\  ret %r
+        \\}
+    ;
+    const v = try evalMain(src, alloc);
+    try std.testing.expectEqual(@as(i64, 0), v.int);
+}
+
+test "qbe: phi emits correct IL" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\@fib(%n: int): int {
+        \\  entry:
+        \\  %a0 = const 0
+        \\  %b0 = const 1
+        \\  %i0 = const 0
+        \\  jmp loop_cond
+        \\  loop_cond:
+        \\  %a = phi [entry: %a0, loop_body: %a_next]
+        \\  %b = phi [entry: %b0, loop_body: %b_next]
+        \\  %i = phi [entry: %i0, loop_body: %i_next]
+        \\  %cond = lt %i, %n
+        \\  br_if %cond, loop_body, loop_end
+        \\  loop_body:
+        \\  %tmp = add %a, %b
+        \\  %a_next = %b
+        \\  %b_next = %tmp
+        \\  %i_next = add %i, 1
+        \\  jmp loop_cond
+        \\  loop_end:
+        \\  ret %a
+        \\}
+    ;
+    const list = try bear_lexer.tokenize(src, alloc);
+    var prog = try bear_parser.parse(list.items, list, alloc);
+    defer prog.deinit(alloc);
+    const ir = try bear_qbe.emit(&prog, alloc);
+    defer alloc.free(ir);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "phi") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "@entry") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "@loop_body") != null);
+}
+
+test "llvm: phi emits correct IR" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\@fib(%n: int): int {
+        \\  entry:
+        \\  %a0 = const 0
+        \\  %b0 = const 1
+        \\  %i0 = const 0
+        \\  jmp loop_cond
+        \\  loop_cond:
+        \\  %a = phi [entry: %a0, loop_body: %a_next]
+        \\  %b = phi [entry: %b0, loop_body: %b_next]
+        \\  %i = phi [entry: %i0, loop_body: %i_next]
+        \\  %cond = lt %i, %n
+        \\  br_if %cond, loop_body, loop_end
+        \\  loop_body:
+        \\  %tmp = add %a, %b
+        \\  %a_next = %b
+        \\  %b_next = %tmp
+        \\  %i_next = add %i, 1
+        \\  jmp loop_cond
+        \\  loop_end:
+        \\  ret %a
+        \\}
+    ;
+    const list = try bear_lexer.tokenize(src, alloc);
+    var prog = try bear_parser.parse(list.items, list, alloc);
+    defer prog.deinit(alloc);
+    const ir = try bear_llvm.emit(&prog, alloc);
+    defer alloc.free(ir);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "phi i64") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "%entry") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "%loop_body") != null);
+}
