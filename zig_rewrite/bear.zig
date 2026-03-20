@@ -940,3 +940,124 @@ test "llvm: phi emits correct IR" {
     try std.testing.expect(std.mem.indexOf(u8, ir, "%entry") != null);
     try std.testing.expect(std.mem.indexOf(u8, ir, "%loop_body") != null);
 }
+
+fn qbeEmit(src: []const u8, alloc: std.mem.Allocator) ![]const u8 {
+    const list = try bear_lexer.tokenize(src, alloc);
+    var prog = try bear_parser.parse(list.items, list, alloc);
+    defer prog.deinit(alloc);
+    return bear_qbe.emit(&prog, alloc);
+}
+
+fn llvmEmit(src: []const u8, alloc: std.mem.Allocator) ![]const u8 {
+    const list = try bear_lexer.tokenize(src, alloc);
+    var prog = try bear_parser.parse(list.items, list, alloc);
+    defer prog.deinit(alloc);
+    return bear_llvm.emit(&prog, alloc);
+}
+
+test "qbe: alloc produces l-typed tmp" {
+    const alloc = std.testing.allocator;
+    const ir = try qbeEmit("@main(): int { %buf = alloc 1024 ret 0 }", alloc);
+    defer alloc.free(ir);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "=l alloc8") != null);
+}
+
+test "qbe: alloc8 size operand is l-typed" {
+    const alloc = std.testing.allocator;
+    const ir = try qbeEmit("@main(): int { %buf = alloc 1024 ret 0 }", alloc);
+    defer alloc.free(ir);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "=l copy 1024") != null);
+}
+
+test "qbe: alloc passed to read uses l type" {
+    const alloc = std.testing.allocator;
+    const ir = try qbeEmit(
+        \\@main(): int {
+        \\  %f = call open("test.txt", READ)
+        \\  %buf = alloc 1024
+        \\  %n = call read(%f, %buf, 1024)
+        \\  ret 0
+        \\}
+    , alloc);
+    defer alloc.free(ir);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "call $read(") != null);
+    const read_pos = std.mem.indexOf(u8, ir, "call $read(").?;
+    const read_line_end = std.mem.indexOfScalarPos(u8, ir, read_pos, '\n').?;
+    const read_line = ir[read_pos..read_line_end];
+    try std.testing.expect(std.mem.count(u8, read_line, "l %t") >= 1);
+}
+
+test "qbe: string reg passed to puts uses l type" {
+    const alloc = std.testing.allocator;
+    const ir = try qbeEmit(
+        \\@main(): int {
+        \\  %s = const "Hello"
+        \\  call puts(%s)
+        \\  ret 0
+        \\}
+    , alloc);
+    defer alloc.free(ir);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "call $puts(l ") != null);
+}
+
+test "llvm: putf and flush are declared" {
+    const alloc = std.testing.allocator;
+    const ir = try llvmEmit("@main(): int { call putf(42) call flush() ret 0 }", alloc);
+    defer alloc.free(ir);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "declare void @putf") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "declare void @flush") != null);
+}
+
+test "llvm: alloc passed to read uses ptr type" {
+    const alloc = std.testing.allocator;
+    const ir = try llvmEmit(
+        \\@main(): int {
+        \\  %f = call open("test.txt", READ)
+        \\  %buf = alloc 1024
+        \\  %n = call read(%f, %buf, 1024)
+        \\  ret 0
+        \\}
+    , alloc);
+    defer alloc.free(ir);
+    const read_pos = std.mem.indexOf(u8, ir, "call i64 @read(").?;
+    const read_end = std.mem.indexOfScalarPos(u8, ir, read_pos, '\n').?;
+    const read_line = ir[read_pos..read_end];
+    try std.testing.expect(std.mem.indexOf(u8, read_line, "ptr %t") != null);
+}
+
+test "llvm: string reg passed to puts uses ptr type" {
+    const alloc = std.testing.allocator;
+    const ir = try llvmEmit(
+        \\@main(): int {
+        \\  %s = const "Hello"
+        \\  call puts(%s)
+        \\  ret 0
+        \\}
+    , alloc);
+    defer alloc.free(ir);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "call i32 @puts(ptr ") != null);
+}
+
+test "qbe: simple.bear emits without error" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\@other_func: void {
+        \\  call puts("here i go, doing some thing")
+        \\}
+        \\@main(): int {
+        \\  %0 = const 10
+        \\  call putf(%0)
+        \\  %1 = const "Hello, world."
+        \\  call puts(%1)
+        \\  call puts("Hi there.")
+        \\  call other_func
+        \\  call flush()
+        \\  ret 0
+        \\}
+    ;
+    const ir = try qbeEmit(src, alloc);
+    defer alloc.free(ir);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "call $putf(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "call $flush()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "call $puts(l ") != null);
+}
