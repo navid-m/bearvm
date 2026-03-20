@@ -156,6 +156,7 @@ pub const HeapStruct = struct {
 pub const HeapArray = struct {
     cells: []HeapCell,
     alloc: std.mem.Allocator,
+
     pub fn deinit(self: *HeapArray) void {
         for (self.cells) |*c| c.value.deinit(self.alloc);
         self.alloc.free(self.cells);
@@ -164,12 +165,15 @@ pub const HeapArray = struct {
 
 pub const BearArena = struct {
     inner: std.heap.ArenaAllocator,
+
     pub fn init(backing: std.mem.Allocator) BearArena {
         return .{ .inner = std.heap.ArenaAllocator.init(backing) };
     }
+
     pub fn allocator(self: *BearArena) std.mem.Allocator {
         return self.inner.allocator();
     }
+
     pub fn deinit(self: *BearArena) void {
         self.inner.deinit();
     }
@@ -290,12 +294,15 @@ const CALL_STACK_SLOTS: usize = 1 << 20;
 const CallStack = struct {
     buf: []Value,
     top: usize,
+
     fn init(alloc: std.mem.Allocator) !CallStack {
         return .{ .buf = try alloc.alloc(Value, CALL_STACK_SLOTS), .top = 0 };
     }
+
     fn deinit(self: *CallStack, alloc: std.mem.Allocator) void {
         alloc.free(self.buf);
     }
+
     inline fn push(self: *CallStack, n: usize) ![]Value {
         const s = self.top;
         const e = s + n;
@@ -303,6 +310,7 @@ const CallStack = struct {
         self.top = e;
         return self.buf[s..e];
     }
+
     inline fn pop(self: *CallStack, n: usize) void {
         self.top -= n;
     }
@@ -1052,7 +1060,6 @@ pub const Vm = struct {
                     for (entries) |e| {
                         if (e.pred_label_idx == prev_label_idx) {
                             env[ins.dst] = env[e.src_reg];
-                            // Propagate bool tag through phi.
                             if (ins.dst < 64 and e.src_reg < 64) {
                                 const src_bit = (bool_regs >> @intCast(e.src_reg)) & 1;
                                 bool_regs = (bool_regs & ~(@as(u64, 1) << @intCast(ins.dst))) |
