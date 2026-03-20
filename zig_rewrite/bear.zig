@@ -23,8 +23,8 @@ pub fn main() !void {
     const first = argv[1];
     const is_qbe = std.mem.eql(u8, first, "qbe");
     const is_llvm = std.mem.eql(u8, first, "llvm");
-    const is_ast = std.mem.eql(u8, first, "--ast");
-    const is_jit = std.mem.eql(u8, first, "--jit");
+    const is_ast = std.mem.eql(u8, first, "ast");
+    const is_jit = std.mem.eql(u8, first, "jit");
     const is_version = std.mem.eql(u8, first, "version");
 
     if (is_version) {
@@ -104,8 +104,8 @@ fn printUsage() void {
         \\Usage:
         \\
         \\  bear <file.bear>              Run via interpreter
-        \\  bear --ast <file.bear>        Print AST as unicode tree
-        \\  bear --jit <file.bear>        JIT compile and run
+        \\  bear ast <file.bear>          Print AST as unicode tree
+        \\  bear jit <file.bear>          JIT compile and run
         \\  bear qbe <file.bear>          Emit QBE IR
         \\  bear qbe <file.bear> -c       Compile with QBE + cc
         \\  bear llvm <file.bear>         Emit LLVM IR
