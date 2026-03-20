@@ -44,6 +44,34 @@ impl StdoutBuf {
     }
 }
 
+/// Stack frame — uses a fixed-size array for small functions to avoid heap allocation.
+const SMALL_FRAME: usize = 64;
+enum Frame {
+    Small(Box<[Value; SMALL_FRAME]>, usize),
+    Heap(Vec<Value>),
+}
+
+impl Frame {
+    #[inline]
+    fn new(n: usize) -> Self {
+        if n <= SMALL_FRAME {
+            let arr = vec![Value::Void; SMALL_FRAME].into_boxed_slice();
+            let arr = unsafe { Box::from_raw(Box::into_raw(arr) as *mut [Value; SMALL_FRAME]) };
+            Frame::Small(arr, n)
+        } else {
+            Frame::Heap(vec![Value::Void; n])
+        }
+    }
+
+    #[inline(always)]
+    fn as_slice_mut(&mut self) -> &mut [Value] {
+        match self {
+            Frame::Small(arr, n) => &mut arr[..*n],
+            Frame::Heap(v) => v.as_mut_slice(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Value {
     Int(i64),
@@ -78,6 +106,7 @@ impl std::fmt::Display for Value {
 #[derive(Clone, Copy)]
 enum Builtin {
     Puts,
+    Flush,
     Open,
     Read,
     Write,
@@ -88,6 +117,7 @@ enum Builtin {
 fn lookup_builtin(name: &str) -> Option<Builtin> {
     match name {
         "puts" => Some(Builtin::Puts),
+        "flush" => Some(Builtin::Flush),
         "open" => Some(Builtin::Open),
         "read" => Some(Builtin::Read),
         "write" => Some(Builtin::Write),
@@ -102,15 +132,29 @@ enum FileHandle {
 }
 
 struct Vm<'a> {
+    /// The program itself.
     program: &'a Program,
+
+    /// Pre-built function name -> index map; eliminates O(n) linear scan per call.
+    func_index: FxHashMap<&'a str, usize>,
+
+    /// Associated file handles.
     files: Vec<Option<FileHandle>>,
+
+    /// The standard output buffer.
     stdout: StdoutBuf,
 }
 
 impl<'a> Vm<'a> {
     fn new(program: &'a Program) -> Self {
+        let mut func_index: FxHashMap<&'a str, usize> = FxHashMap::default();
+        func_index.reserve(program.functions.len());
+        for (i, f) in program.functions.iter().enumerate() {
+            func_index.insert(f.name.as_str(), i);
+        }
         Vm {
             program,
+            func_index,
             files: Vec::new(),
             stdout: StdoutBuf::new(),
         }
@@ -118,7 +162,9 @@ impl<'a> Vm<'a> {
 
     #[inline]
     fn find_func(&self, name: &str) -> Option<&Function> {
-        self.program.functions.iter().find(|f| f.name == name)
+        self.func_index
+            .get(name)
+            .map(|&i| &self.program.functions[i])
     }
 
     #[inline]
@@ -163,6 +209,24 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// Fast path: evaluate an expression expected to produce an i64.
+    /// Avoids boxing the result into Value for the common arithmetic/register case.
+    #[inline(always)]
+    fn eval_int(&mut self, expr: &Expr, env: &[Value]) -> Result<i64, String> {
+        match expr {
+            Expr::Int(n) => Ok(*n),
+            Expr::Reg(r) => match unsafe { env.get_unchecked(*r as usize) } {
+                Value::Int(n) => Ok(*n),
+                v => Err(format!("expected int, got {v:?}")),
+            },
+            Expr::Const(inner) => self.eval_int(inner, env),
+            _ => match self.eval_expr(expr, env)? {
+                Value::Int(n) => Ok(n),
+                v => Err(format!("expected int, got {v:?}")),
+            },
+        }
+    }
+
     #[inline]
     fn eval_expr(&mut self, expr: &Expr, env: &[Value]) -> Result<Value, String> {
         match expr {
@@ -177,59 +241,24 @@ impl<'a> Vm<'a> {
                 v => Err(format!("not a struct (got {v:?})")),
             },
             Expr::Const(inner) => self.eval_expr(inner, env),
-            Expr::Add(a, b) => {
-                let av = self.eval_expr(a, env)?;
-                let bv = self.eval_expr(b, env)?;
-                match (av, bv) {
-                    (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x.wrapping_add(y))),
-                    (a, b) => Err(format!("add: type mismatch {a:?} + {b:?}")),
-                }
-            }
-            Expr::Sub(a, b) => {
-                let av = self.eval_expr(a, env)?;
-                let bv = self.eval_expr(b, env)?;
-                match (av, bv) {
-                    (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x.wrapping_sub(y))),
-                    (a, b) => Err(format!("sub: type mismatch {a:?} - {b:?}")),
-                }
-            }
-            Expr::Mul(a, b) => {
-                let av = self.eval_expr(a, env)?;
-                let bv = self.eval_expr(b, env)?;
-                match (av, bv) {
-                    (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x.wrapping_mul(y))),
-                    (a, b) => Err(format!("mul: type mismatch {a:?} * {b:?}")),
-                }
-            }
+            Expr::Add(a, b) => Ok(Value::Int(
+                self.eval_int(a, env)?.wrapping_add(self.eval_int(b, env)?),
+            )),
+            Expr::Sub(a, b) => Ok(Value::Int(
+                self.eval_int(a, env)?.wrapping_sub(self.eval_int(b, env)?),
+            )),
+            Expr::Mul(a, b) => Ok(Value::Int(
+                self.eval_int(a, env)?.wrapping_mul(self.eval_int(b, env)?),
+            )),
             Expr::Div(a, b) => {
-                let av = self.eval_expr(a, env)?;
-                let bv = self.eval_expr(b, env)?;
-                match (av, bv) {
-                    (Value::Int(x), Value::Int(y)) => {
-                        if y == 0 {
-                            return Err("Division by zero".into());
-                        }
-                        Ok(Value::Int(x / y))
-                    }
-                    (a, b) => Err(format!("div: type mismatch {a:?} / {b:?}")),
+                let b = self.eval_int(b, env)?;
+                if b == 0 {
+                    return Err("Division by zero".into());
                 }
+                Ok(Value::Int(self.eval_int(a, env)? / b))
             }
-            Expr::Lt(a, b) => {
-                let av = self.eval_expr(a, env)?;
-                let bv = self.eval_expr(b, env)?;
-                match (av, bv) {
-                    (Value::Int(x), Value::Int(y)) => Ok(Value::Bool(x < y)),
-                    (a, b) => Err(format!("lt: type mismatch {a:?} < {b:?}")),
-                }
-            }
-            Expr::Gt(a, b) => {
-                let av = self.eval_expr(a, env)?;
-                let bv = self.eval_expr(b, env)?;
-                match (av, bv) {
-                    (Value::Int(x), Value::Int(y)) => Ok(Value::Bool(x > y)),
-                    (a, b) => Err(format!("gt: type mismatch {a:?} > {b:?}")),
-                }
-            }
+            Expr::Lt(a, b) => Ok(Value::Bool(self.eval_int(a, env)? < self.eval_int(b, env)?)),
+            Expr::Gt(a, b) => Ok(Value::Bool(self.eval_int(a, env)? > self.eval_int(b, env)?)),
             Expr::Eq(a, b) => {
                 let av = self.eval_expr(a, env)?;
                 let bv = self.eval_expr(b, env)?;
@@ -291,20 +320,20 @@ impl<'a> Vm<'a> {
             return result;
         }
 
-        let func_idx = self
-            .program
-            .functions
-            .iter()
-            .position(|f| f.name == name)
+        let func_idx = *self
+            .func_index
+            .get(name)
             .ok_or_else(|| format!("Undefined function: {name}"))?;
 
         let n_regs = self.program.functions[func_idx].n_regs as usize;
         let param_count = self.program.functions[func_idx].params.len();
-        let mut frame: Vec<Value> = vec![Value::Void; n_regs];
+
+        let mut frame = Frame::new(n_regs);
+        let frame_slice = frame.as_slice_mut();
 
         for i in 0..param_count {
             let idx = self.program.functions[func_idx].params[i].2 as usize;
-            frame[idx] = unsafe { std::ptr::read(&args_buf[i] as *const _ as *const Value) };
+            frame_slice[idx] = unsafe { std::ptr::read(args_buf[i].as_ptr()) };
         }
         for i in param_count..argc {
             unsafe { args_buf[i].assume_init_drop() };
@@ -313,7 +342,7 @@ impl<'a> Vm<'a> {
         let body_ptr: *const Vec<Stmt> = &self.program.functions[func_idx].body as *const Vec<Stmt>;
         let body: &[Stmt] = unsafe { (*body_ptr).as_slice() };
 
-        match self.exec_body(body, &mut frame)? {
+        match self.exec_body(body, frame.as_slice_mut())? {
             Some(v) => Ok(v),
             None => Ok(Value::Void),
         }
@@ -326,6 +355,10 @@ impl<'a> Vm<'a> {
                 for a in args {
                     self.print_value(a);
                 }
+                self.stdout.flush();
+                Ok(Value::Void)
+            }
+            Builtin::Flush => {
                 self.stdout.flush();
                 Ok(Value::Void)
             }
@@ -404,7 +437,7 @@ impl<'a> Vm<'a> {
     }
 
     #[inline]
-    fn exec_body(&mut self, stmts: &[Stmt], env: &mut Vec<Value>) -> Result<Option<Value>, String> {
+    fn exec_body(&mut self, stmts: &[Stmt], env: &mut [Value]) -> Result<Option<Value>, String> {
         for stmt in stmts {
             if let Some(v) = self.exec_stmt(stmt, env)? {
                 return Ok(Some(v));
@@ -414,7 +447,7 @@ impl<'a> Vm<'a> {
     }
 
     #[inline]
-    fn exec_stmt(&mut self, stmt: &Stmt, env: &mut Vec<Value>) -> Result<Option<Value>, String> {
+    fn exec_stmt(&mut self, stmt: &Stmt, env: &mut [Value]) -> Result<Option<Value>, String> {
         match stmt {
             Stmt::Assign(reg, expr) => {
                 let val = self.eval_expr(expr, env)?;
@@ -441,11 +474,14 @@ impl<'a> Vm<'a> {
             }
             Stmt::While(cond, body) => {
                 loop {
-                    let cv = self.eval_expr(cond, env)?;
-                    let keep = match cv {
-                        Value::Bool(b) => b,
-                        Value::Int(n) => n != 0,
-                        v => return Err(format!("while: condition must be bool, got {v:?}")),
+                    let keep = match cond {
+                        Expr::Lt(a, b) => self.eval_int(a, env)? < self.eval_int(b, env)?,
+                        Expr::Gt(a, b) => self.eval_int(a, env)? > self.eval_int(b, env)?,
+                        _ => match self.eval_expr(cond, env)? {
+                            Value::Bool(b) => b,
+                            Value::Int(n) => n != 0,
+                            v => return Err(format!("while: condition must be bool, got {v:?}")),
+                        },
                     };
                     if !keep {
                         break;
@@ -472,7 +508,6 @@ pub fn run(program: &Program) -> Result<(), String> {
     vm.stdout.flush();
     Ok(())
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
