@@ -22,6 +22,7 @@ const Emitter = struct {
     tmp: TmpId,
     loop_ctr: u32,
     structs: std.StringHashMapUnmanaged([]const lexer.StructField),
+    ptr_tmps: std.AutoHashMapUnmanaged(TmpId, void),
 
     fn init(alloc: std.mem.Allocator) Emitter {
         return .{
@@ -32,12 +33,14 @@ const Emitter = struct {
             .tmp = 0,
             .loop_ctr = 0,
             .structs = .empty,
+            .ptr_tmps = .empty,
         };
     }
 
     fn deinit(self: *Emitter) void {
         self.strings.deinit(self.alloc);
         self.structs.deinit(self.alloc);
+        self.ptr_tmps.deinit(self.alloc);
         self.out.deinit(self.alloc);
     }
 
@@ -143,6 +146,7 @@ const Emitter = struct {
                 try self.out.appendSlice(self.alloc, " = alloca i8, i64 ");
                 try self.writeSlot(sv);
                 try self.out.appendSlice(self.alloc, ", align 8\n");
+                try self.ptr_tmps.put(self.alloc, t, {});
                 return .{ .tmp = t };
             },
             .named => |name| {
@@ -164,6 +168,7 @@ const Emitter = struct {
                 var buf: [32]u8 = undefined;
                 const s = std.fmt.bufPrint(&buf, " = alloca i8, i64 {d}, align 8\n", .{size}) catch unreachable;
                 try self.out.appendSlice(self.alloc, s);
+                try self.ptr_tmps.put(self.alloc, ptr, {});
                 for (fields, 0..) |fd, i| {
                     var fval: ?*lexer.Expr = null;
                     for (sl.fields.items) |fi| {
@@ -221,6 +226,7 @@ const Emitter = struct {
                 try self.out.appendSlice(self.alloc, "  ");
                 try self.writeTmp(t);
                 try self.out.appendSlice(self.alloc, " = call ptr @bear_arena_create()\n");
+                try self.ptr_tmps.put(self.alloc, t, {});
                 return .{ .tmp = t };
             },
             .arena_alloc => |aa| {
@@ -233,6 +239,7 @@ const Emitter = struct {
                 try self.out.appendSlice(self.alloc, ", i64 ");
                 try self.writeSlot(size_slot);
                 try self.out.appendSlice(self.alloc, ")\n");
+                try self.ptr_tmps.put(self.alloc, t, {});
                 return .{ .tmp = t };
             },
             .alloc_type => |type_name| {
@@ -252,6 +259,7 @@ const Emitter = struct {
                 var buf: [32]u8 = undefined;
                 const s = std.fmt.bufPrint(&buf, " = alloca i8, i64 {d}, align 8\n", .{size}) catch unreachable;
                 try self.out.appendSlice(self.alloc, s);
+                try self.ptr_tmps.put(self.alloc, t, {});
                 return .{ .tmp = t };
             },
             .alloc_array => |aa| {
@@ -272,6 +280,7 @@ const Emitter = struct {
                 try self.out.appendSlice(self.alloc, " = alloca i8, i64 ");
                 try self.writeTmp(size_tmp);
                 try self.out.appendSlice(self.alloc, ", align 8\n");
+                try self.ptr_tmps.put(self.alloc, t, {});
                 return .{ .tmp = t };
             },
             .load => |ptr_reg| {
@@ -376,20 +385,26 @@ const Emitter = struct {
         return .{ .tmp = t };
     }
 
+    fn isPtr(self: *Emitter, a: *lexer.Expr, env: []Slot) bool {
+        return switch (a.*) {
+            .str => true,
+            .alloc, .alloc_type, .alloc_array, .arena_alloc, .arena_create => true,
+            .reg => |r| switch (env[r]) {
+                .param => true,
+                .tmp => |id| self.ptr_tmps.contains(id),
+                .undef => false,
+            },
+            else => false,
+        };
+    }
+
     fn emitCallExpr(self: *Emitter, name: []const u8, arg_exprs: []*lexer.Expr, env: []Slot) !Slot {
         var slots_buf: [16]Slot = undefined;
         var is_ptr_buf: [16]bool = undefined;
         const argc = arg_exprs.len;
         for (arg_exprs, 0..) |a, i| {
             slots_buf[i] = try self.emitExpr(a, env);
-            is_ptr_buf[i] = switch (a.*) {
-                .str => true,
-                .reg => |r| switch (env[r]) {
-                    .param => true,
-                    else => false,
-                },
-                else => false,
-            } or (std.mem.eql(u8, name, "puts") and i == 0);
+            is_ptr_buf[i] = self.isPtr(a, env) or (std.mem.eql(u8, name, "puts") and i == 0);
         }
         const ret_ty: []const u8 = if (std.mem.eql(u8, name, "puts")) "i32" else "i64";
         const t = self.fresh();
@@ -415,14 +430,7 @@ const Emitter = struct {
         const argc = arg_exprs.len;
         for (arg_exprs, 0..) |a, i| {
             slots_buf[i] = try self.emitExpr(a, env);
-            is_ptr_buf[i] = switch (a.*) {
-                .str => true,
-                .reg => |r| switch (env[r]) {
-                    .param => true,
-                    else => false,
-                },
-                else => false,
-            } or (std.mem.eql(u8, name, "puts") and i == 0);
+            is_ptr_buf[i] = self.isPtr(a, env) or (std.mem.eql(u8, name, "puts") and i == 0);
         }
         const ret_ty: []const u8 = if (std.mem.eql(u8, name, "puts")) "i32" else "i64";
         const t = self.fresh();
