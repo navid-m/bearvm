@@ -182,6 +182,23 @@ pub const HeapArray = struct {
     }
 };
 
+/// Arena allocator — all allocations freed at once on arena_destroy.
+pub const BearArena = struct {
+    inner: std.heap.ArenaAllocator,
+
+    pub fn init(backing: std.mem.Allocator) BearArena {
+        return .{ .inner = std.heap.ArenaAllocator.init(backing) };
+    }
+
+    pub fn allocator(self: *BearArena) std.mem.Allocator {
+        return self.inner.allocator();
+    }
+
+    pub fn deinit(self: *BearArena) void {
+        self.inner.deinit();
+    }
+};
+
 const StructVal = struct {
     name: []const u8,
     fields: std.StringArrayHashMap(Value),
@@ -224,6 +241,8 @@ pub const Vm = struct {
     heap_structs: std.ArrayListUnmanaged(*HeapStruct),
     /// Heap-allocated arrays (owned here, freed on deinit)
     heap_arrays: std.ArrayListUnmanaged(*HeapArray),
+    /// Arenas (owned here, freed on deinit or arena_destroy)
+    arenas: std.ArrayListUnmanaged(?*BearArena),
     alloc: std.mem.Allocator,
     tasks: ?*TaskTable,
 
@@ -268,6 +287,7 @@ pub const Vm = struct {
             .files = .empty,
             .heap_structs = .empty,
             .heap_arrays = .empty,
+            .arenas = .empty,
             .alloc = alloc,
             .tasks = null,
         };
@@ -290,6 +310,13 @@ pub const Vm = struct {
             self.alloc.destroy(ha);
         }
         self.heap_arrays.deinit(self.alloc);
+        for (self.arenas.items) |maybe_arena| {
+            if (maybe_arena) |arena| {
+                arena.deinit();
+                self.alloc.destroy(arena);
+            }
+        }
+        self.arenas.deinit(self.alloc);
     }
 
     pub fn findFunc(self: *Vm, name: []const u8) ?*const lexer.Function {
@@ -386,7 +413,6 @@ pub const Vm = struct {
                     return .{ .ptr = buf };
                 },
                 .alloc_type => |type_name| {
-                    // Find the struct definition and allocate a HeapStruct
                     const struct_def = blk: {
                         for (self.program.structs.items) |*sd| {
                             if (std.mem.eql(u8, sd.name, type_name)) break :blk sd;
@@ -398,7 +424,6 @@ pub const Vm = struct {
                         .name = struct_def.name,
                         .fields = std.StringArrayHashMap(HeapCell).init(self.alloc),
                     };
-                    // Pre-populate fields with zero values
                     for (struct_def.fields.items) |f| {
                         const zero: Value = switch (f.ty) {
                             .int => .{ .int = 0 },
@@ -409,8 +434,6 @@ pub const Vm = struct {
                         try hs.fields.put(f.name, .{ .value = zero });
                     }
                     try self.heap_structs.append(self.alloc, hs);
-                    // Encode the HeapStruct pointer in a single-cell HeapArray sentinel.
-                    // get_field_ref detects this by checking if the cell's value is a struct pointer.
                     const ha = try self.alloc.create(HeapArray);
                     ha.* = .{ .cells = try self.alloc.alloc(HeapCell, 1), .alloc = self.alloc };
                     ha.cells[0] = .{ .value = .{ .int = @as(i64, @bitCast(@intFromPtr(hs))) } };
@@ -430,7 +453,6 @@ pub const Vm = struct {
                         } };
                     }
                     try self.heap_arrays.append(self.alloc, ha);
-                    // Return a ref to cell[0] as the array handle
                     return .{ .ref = &ha.cells[0] };
                 },
                 .load => |ptr_reg| {
@@ -441,7 +463,6 @@ pub const Vm = struct {
                     return cell.value;
                 },
                 .get_field_ref => |gfr| {
-                    // The register holds a ref whose .value is the HeapStruct pointer (as int)
                     const cell = switch (env[gfr.ptr]) {
                         .ref => |r| r,
                         else => return error.NotAPointer,
@@ -451,15 +472,11 @@ pub const Vm = struct {
                     return .{ .ref = field_cell };
                 },
                 .get_index_ref => |gir| {
-                    // The register holds a ref to cell[0] of a HeapArray.
-                    // We compute the element pointer by offset from cell[0].
                     const base_cell = switch (env[gir.arr]) {
                         .ref => |r| r,
                         else => return error.NotAPointer,
                     };
                     const idx: usize = @intCast((try self.evalExpr(gir.idx, env)).int);
-                    // Walk back to the HeapArray by scanning heap_arrays for the one whose
-                    // cells[0] address matches base_cell.
                     const ha = blk: {
                         for (self.heap_arrays.items) |ha| {
                             if (ha.cells.len > 0 and &ha.cells[0] == base_cell) break :blk ha;
@@ -511,6 +528,50 @@ pub const Vm = struct {
                     return try task_table.join(task_id);
                 },
                 .call => |c| return try self.callFunc(c.name, c.args.items, env),
+                .free => |ptr_reg| {
+                    switch (env[ptr_reg]) {
+                        .ptr => |p| {
+                            self.alloc.free(p);
+                            env[ptr_reg] = .void_;
+                        },
+                        .ref => |r| {
+                            for (self.heap_arrays.items, 0..) |ha, i| {
+                                if (ha.cells.len > 0 and &ha.cells[0] == r) {
+                                    ha.deinit();
+                                    self.alloc.destroy(ha);
+                                    self.heap_arrays.items[i] = self.heap_arrays.items[self.heap_arrays.items.len - 1];
+                                    self.heap_arrays.items.len -= 1;
+                                    env[ptr_reg] = .void_;
+                                    return .void_;
+                                }
+                            }
+                            return error.InvalidFree;
+                        },
+                        else => return error.InvalidFree,
+                    }
+                    return .void_;
+                },
+                .arena_create => {
+                    const arena = try self.alloc.create(BearArena);
+                    arena.* = BearArena.init(self.alloc);
+                    for (self.arenas.items, 0..) |slot, i| {
+                        if (slot == null) {
+                            self.arenas.items[i] = arena;
+                            return .{ .int = @intCast(i) };
+                        }
+                    }
+                    try self.arenas.append(self.alloc, arena);
+                    return .{ .int = @intCast(self.arenas.items.len - 1) };
+                },
+                .arena_alloc => |aa| {
+                    const arena_id: usize = @intCast(env[aa.arena].int);
+                    if (arena_id >= self.arenas.items.len) return error.InvalidArena;
+                    const arena = self.arenas.items[arena_id] orelse return error.InvalidArena;
+                    const n: usize = @intCast((try self.evalExpr(aa.size, env)).int);
+                    const buf = try arena.allocator().alloc(u8, n);
+                    @memset(buf, 0);
+                    return .{ .ptr = buf };
+                },
             }
         }
     }
@@ -665,6 +726,40 @@ pub const Vm = struct {
                 .set_field => |sf| {
                     const val = try self.evalExpr(sf.expr, env);
                     try env[sf.reg].struct_.fields.put(sf.field, val);
+                    pc += 1;
+                },
+                .free => |ptr_reg| {
+                    switch (env[ptr_reg]) {
+                        .ptr => |p| {
+                            self.alloc.free(p);
+                            env[ptr_reg] = .void_;
+                        },
+                        .ref => |r| {
+                            for (self.heap_arrays.items, 0..) |ha, i| {
+                                if (ha.cells.len > 0 and &ha.cells[0] == r) {
+                                    ha.deinit();
+                                    self.alloc.destroy(ha);
+                                    self.heap_arrays.items[i] = self.heap_arrays.items[self.heap_arrays.items.len - 1];
+                                    self.heap_arrays.items.len -= 1;
+                                    env[ptr_reg] = .void_;
+                                    break;
+                                }
+                            }
+                        },
+                        else => return error.InvalidFree,
+                    }
+                    pc += 1;
+                },
+                .arena_destroy => |arena_reg| {
+                    const arena_id: usize = @intCast(env[arena_reg].int);
+                    if (arena_id < self.arenas.items.len) {
+                        if (self.arenas.items[arena_id]) |arena| {
+                            arena.deinit();
+                            self.alloc.destroy(arena);
+                            self.arenas.items[arena_id] = null;
+                        }
+                    }
+                    env[arena_reg] = .void_;
                     pc += 1;
                 },
                 .store => |s| {

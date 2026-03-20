@@ -202,6 +202,34 @@ const Emitter = struct {
             .spawn => |sp| return self.emitCallExpr(sp.name, sp.args.items, env),
             // sync: the value is already in the register
             .sync => |r| return env[r],
+            .free => |ptr_reg| {
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                try self.out.appendSlice(self.alloc, " =w call $free(l ");
+                try self.writeSlot(env[ptr_reg]);
+                try self.out.appendSlice(self.alloc, ")\n");
+                return .{ .tmp = t };
+            },
+            .arena_create => {
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                try self.out.appendSlice(self.alloc, " =l call $bear_arena_create()\n");
+                return .{ .tmp = t };
+            },
+            .arena_alloc => |aa| {
+                const size_slot = try self.emitExpr(aa.size, env);
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                try self.out.appendSlice(self.alloc, " =l call $bear_arena_alloc(l ");
+                try self.writeSlot(env[aa.arena]);
+                try self.out.appendSlice(self.alloc, ", l ");
+                try self.writeSlot(size_slot);
+                try self.out.appendSlice(self.alloc, ")\n");
+                return .{ .tmp = t };
+            },
             .alloc_type, .alloc_array, .load, .get_field_ref, .get_index_ref => return error.UnsupportedExpr,
         }
     }
@@ -344,6 +372,16 @@ const Emitter = struct {
                 try self.out.append(self.alloc, '\n');
             },
             .store => return error.UnsupportedStmt,
+            .free => |ptr_reg| {
+                try self.out.appendSlice(self.alloc, "  call $free(l ");
+                try self.writeSlot(env[ptr_reg]);
+                try self.out.appendSlice(self.alloc, ")\n");
+            },
+            .arena_destroy => |arena_reg| {
+                try self.out.appendSlice(self.alloc, "  call $bear_arena_destroy(l ");
+                try self.writeSlot(env[arena_reg]);
+                try self.out.appendSlice(self.alloc, ")\n");
+            },
         }
     }
 

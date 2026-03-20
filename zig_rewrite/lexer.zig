@@ -32,6 +32,10 @@ pub const TokenTag = enum(u8) {
     kw_load,
     kw_get_field_ref,
     kw_get_index_ref,
+    kw_free,
+    kw_arena_create,
+    kw_arena_alloc,
+    kw_arena_destroy,
     ty_int,
     ty_void,
     ty_string,
@@ -78,6 +82,10 @@ pub const Token = union(TokenTag) {
     kw_load,
     kw_get_field_ref,
     kw_get_index_ref,
+    kw_free,
+    kw_arena_create,
+    kw_arena_alloc,
+    kw_arena_destroy,
     ty_int,
     ty_void,
     ty_string,
@@ -121,6 +129,10 @@ pub fn keywordToken(word: []const u8) ?Token {
         .{ "load", Token.kw_load },
         .{ "get_field_ref", Token.kw_get_field_ref },
         .{ "get_index_ref", Token.kw_get_index_ref },
+        .{ "free", Token.kw_free },
+        .{ "arena_create", Token.kw_arena_create },
+        .{ "arena_alloc", Token.kw_arena_alloc },
+        .{ "arena_destroy", Token.kw_arena_destroy },
         .{ "int", Token.ty_int },
         .{ "void", Token.ty_void },
         .{ "string", Token.ty_string },
@@ -305,6 +317,8 @@ pub const Stmt = union(enum) {
     jmp: []const u8,
     br_if: struct { cond: RegIdx, true_label: []const u8, false_label: []const u8 },
     store: struct { ptr: RegIdx, expr: *Expr },
+    free: RegIdx,
+    arena_destroy: RegIdx,
 
     pub fn deinit(self: *Stmt, alloc: std.mem.Allocator) void {
         switch (self.*) {
@@ -346,6 +360,9 @@ pub const Expr = union(enum) {
     named: []const u8,
     spawn: struct { name: []const u8, args: std.ArrayListUnmanaged(*Expr) },
     sync: RegIdx,
+    free: RegIdx,
+    arena_create,
+    arena_alloc: struct { arena: RegIdx, size: *Expr },
 };
 
 pub const ExprSlab = struct {

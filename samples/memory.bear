@@ -1,0 +1,52 @@
+struct Person {
+    age: int
+    score: int
+}
+
+@test_free {
+    call puts("--- manual alloc/free ---")
+
+    %buf = alloc 16
+    call puts("allocated 16-byte buffer")
+    free %buf
+    call puts("freed buffer")
+
+    %p = alloc Person
+    %age_ref = get_field_ref %p, age
+    store %age_ref, 42
+    %score_ref = get_field_ref %p, score
+    store %score_ref, 100
+    %age_val = load %age_ref
+    %score_val = load %score_ref
+    call puts("Person.age =")
+    call puts(%age_val)
+    call puts("Person.score =")
+    call puts(%score_val)
+    free %p
+    call puts("freed Person")
+    ret 0
+}
+
+@test_arena {
+    call puts("--- arena alloc/destroy ---")
+
+    %arena = arena_create
+    call puts("arena created")
+
+    %a = arena_alloc %arena, 64
+    %b = arena_alloc %arena, 128
+    %c = arena_alloc %arena, 32
+    call puts("allocated 3 buffers from arena (64, 128, 32 bytes)")
+
+    arena_destroy %arena
+    call puts("arena destroyed (all 3 buffers freed)")
+    ret 0
+}
+
+@main {
+    call @test_free()
+    call @test_arena()
+    call puts("done")
+    call flush()
+    ret 0
+}

@@ -172,6 +172,24 @@ const Parser = struct {
                 const idx = try rm.intern(r);
                 break :blk try self.box(.{ .sync = idx });
             },
+            .kw_free => blk: {
+                _ = self.advance();
+                const r = try self.expectReg();
+                const idx = try rm.intern(r);
+                break :blk try self.box(.{ .free = idx });
+            },
+            .kw_arena_create => blk: {
+                _ = self.advance();
+                break :blk try self.box(.arena_create);
+            },
+            .kw_arena_alloc => blk: {
+                _ = self.advance();
+                const r = try self.expectReg();
+                const arena_idx = try rm.intern(r);
+                _ = try self.expectTag(.comma);
+                const size_expr = try self.parseExpr(rm);
+                break :blk try self.box(.{ .arena_alloc = .{ .arena = arena_idx, .size = size_expr } });
+            },
             .kw_alloc => blk: {
                 _ = self.advance();
                 if (std.meta.activeTag(self.peek()) == .ident) {
@@ -350,6 +368,18 @@ const Parser = struct {
                 _ = try self.expectTag(.comma);
                 const val_expr = try self.parseExpr(rm);
                 break :blk .{ .store = .{ .ptr = ptr_idx, .expr = val_expr } };
+            },
+            .kw_free => blk: {
+                _ = self.advance();
+                const r = try self.expectReg();
+                const idx = try rm.intern(r);
+                break :blk .{ .free = idx };
+            },
+            .kw_arena_destroy => blk: {
+                _ = self.advance();
+                const r = try self.expectReg();
+                const idx = try rm.intern(r);
+                break :blk .{ .arena_destroy = idx };
             },
             else => error.UnexpectedStmtToken,
         };

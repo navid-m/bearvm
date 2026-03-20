@@ -124,6 +124,22 @@ const Printer = struct {
                 const s = try std.fmt.bufPrint(&buf, "sync(%{d})", .{reg});
                 self.node(prefix, is_last, depth, s);
             },
+            .free => |reg| {
+                var buf: [32]u8 = undefined;
+                const s = try std.fmt.bufPrint(&buf, "free(%{d})", .{reg});
+                self.node(prefix, is_last, depth, s);
+            },
+            .arena_create => {
+                self.node(prefix, is_last, depth, "arena_create");
+            },
+            .arena_alloc => |aa| {
+                var buf: [48]u8 = undefined;
+                const s = try std.fmt.bufPrint(&buf, "arena_alloc(%{d})", .{aa.arena});
+                self.node(prefix, is_last, depth, s);
+                const cp = try childPrefix(alloc, prefix, is_last);
+                defer alloc.free(cp);
+                try self.printExpr(alloc, aa.size, cp, true, depth + 1);
+            },
             .alloc_type => |name| {
                 const label = try std.fmt.allocPrint(alloc, "alloc_type({s})", .{name});
                 defer alloc.free(label);
@@ -241,6 +257,16 @@ const Printer = struct {
                 const cp = try childPrefix(alloc, prefix, is_last);
                 defer alloc.free(cp);
                 try self.printExpr(alloc, st.expr, cp, true, depth + 1);
+            },
+            .free => |reg| {
+                var buf: [32]u8 = undefined;
+                const label = try std.fmt.bufPrint(&buf, "free(%{d})", .{reg});
+                self.node(prefix, is_last, depth, label);
+            },
+            .arena_destroy => |reg| {
+                var buf: [48]u8 = undefined;
+                const label = try std.fmt.bufPrint(&buf, "arena_destroy(%{d})", .{reg});
+                self.node(prefix, is_last, depth, label);
             },
         }
     }

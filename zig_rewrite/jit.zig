@@ -334,7 +334,7 @@ const Compiler = struct {
                 emitImm64(self.buf, SCRATCH_C, @intFromPtr(&bear_puts));
                 self.buf.emit(blr(SCRATCH_C));
             }
-            if (dst != 0) self.buf.emit(movz(dst, 0, 0)); // puts returns void
+            if (dst != 0) self.buf.emit(movz(dst, 0, 0));
             return;
         }
 
@@ -395,7 +395,7 @@ const Compiler = struct {
                     try self.evalExpr(w.cond, SCRATCH_A);
 
                     const cbz_idx = self.buf.here();
-                    self.buf.emit(0xb4000000 | @as(u32, SCRATCH_A)); // placeholder
+                    self.buf.emit(0xb4000000 | @as(u32, SCRATCH_A));
 
                     try self.compileStmts(w.body.items);
 
@@ -442,6 +442,8 @@ const Compiler = struct {
 
                 .set_field => return error.UnsupportedStmt,
                 .store => return error.UnsupportedStmt,
+                .free => return error.UnsupportedStmt,
+                .arena_destroy => return error.UnsupportedStmt,
             }
         }
     }
