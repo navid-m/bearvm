@@ -1,0 +1,28 @@
+@fib(%n: int): int {
+entry:
+    %two = const 2
+    %cond = lt %n, %two
+    br_if %cond, base, recurse
+
+base:
+    ret %n
+
+recurse:
+    %one = const 1
+    %n1 = sub %n, %one
+    %n2 = sub %n, %two
+    %r1 = call fib(%n1)
+    %r2 = call fib(%n2)
+    %result = add %r1, %r2
+    ret %result
+}
+
+@main(): int {
+entry:
+    %n = const 28
+    %result = call fib(%n)
+    call puts(%result)
+    call flush()
+    %zero = const 0
+    ret %zero
+}
