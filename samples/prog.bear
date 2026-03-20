@@ -1,0 +1,9 @@
+@main(): int {
+entry:
+    %a = const 5
+    %b = const 3
+    %c = add %a, %b
+    call puts(%c)
+    call flush()
+    ret 0
+}
