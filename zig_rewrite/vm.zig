@@ -313,12 +313,15 @@ const INT_STACK_SLOTS: usize = 1 << 21;
 const IntStack = struct {
     buf: []i64,
     top: usize,
+
     fn init(alloc: std.mem.Allocator) !IntStack {
         return .{ .buf = try alloc.alloc(i64, INT_STACK_SLOTS), .top = 0 };
     }
+
     fn deinit(self: *IntStack, alloc: std.mem.Allocator) void {
         alloc.free(self.buf);
     }
+
     inline fn push(self: *IntStack, n: usize) ![]i64 {
         const s = self.top;
         const e = s + n;
@@ -326,6 +329,7 @@ const IntStack = struct {
         self.top = e;
         return self.buf[s..e];
     }
+
     inline fn pop(self: *IntStack, n: usize) void {
         self.top -= n;
     }
