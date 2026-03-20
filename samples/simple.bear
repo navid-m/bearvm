@@ -11,4 +11,3 @@
 	call other_func
 	ret 0
 }
-
