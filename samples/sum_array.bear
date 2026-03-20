@@ -1,0 +1,52 @@
+@fill_array(%arr, %n: int): void {
+    %i = const 0
+fill_loop_cond:
+    %cond = lt %i, %n
+    br_if %cond, fill_loop_body, fill_loop_end
+
+fill_loop_body:
+    %val = mul %i, 2
+    %ptr = get_index_ref %arr, %i
+    store %ptr, %val
+
+    %i_next = add %i, 1
+    %i = %i_next
+    jmp fill_loop_cond
+
+fill_loop_end:
+    ret
+}
+
+@sum_array(%arr, %n: int): int {
+    %i = const 0
+    %sum = const 0
+
+sum_loop_cond:
+    %cond = lt %i, %n
+    br_if %cond, sum_loop_body, sum_loop_end
+
+sum_loop_body:
+    %ptr = get_index_ref %arr, %i
+    %val = load %ptr
+    %sum_next = add %sum, %val
+
+    %sum = %sum_next
+    %i_next = add %i, 1
+    %i = %i_next
+    jmp sum_loop_cond
+
+sum_loop_end:
+    ret %sum
+}
+
+@main(): int {
+    %n = const 1000000
+    %arr = alloc_array int, %n
+
+    call fill_array(%arr, %n)
+    %result = call sum_array(%arr, %n)
+
+    call puts(%result)
+    call flush()
+    ret 0
+}
