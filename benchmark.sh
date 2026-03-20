@@ -4,13 +4,12 @@
 
 set -e
 
-RUST_BIN="./target/release/bear"
+RUST_BIN="./rust_version/target/release/bear"
 ZIG_BIN="./zig_rewrite/zig-out/bin/bear-zig"
 SAMPLES_DIR="./samples"
 
-# Build both in release mode
 echo "==> Building Rust (release)..."
-cargo build --release 2>&1 | tail -1
+(cd rust_version && cargo build --release 2>&1 | tail -1)
 
 echo "==> Building Zig (ReleaseFast)..."
 (cd zig_rewrite && zig build -Doptimize=ReleaseFast 2>&1 | tail -1)
@@ -19,7 +18,6 @@ echo ""
 echo "==> Verifying outputs match..."
 for f in "$SAMPLES_DIR"/*.bear; do
     name=$(basename "$f")
-    # skip IO samples that need files on disk
     if [[ "$name" == "read_io.bear" || "$name" == "write_io.bear" ]]; then
         echo "  skipping $name (file I/O)"
         continue
@@ -37,7 +35,6 @@ done
 
 echo ""
 
-# Use hyperfine if available, otherwise manual loop
 if command -v hyperfine &>/dev/null; then
     echo "==> Benchmarking with hyperfine (warmup=3, runs=50)..."
     echo ""
