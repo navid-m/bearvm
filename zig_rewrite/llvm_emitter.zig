@@ -23,6 +23,9 @@ const Emitter = struct {
     loop_ctr: u32,
     structs: std.StringHashMapUnmanaged([]const lexer.StructField),
     ptr_tmps: std.AutoHashMapUnmanaged(TmpId, void),
+    float_tmps: std.AutoHashMapUnmanaged(TmpId, void),
+    cur_ret_ty: lexer.Ty,
+    func_ret_tys: std.StringHashMapUnmanaged(lexer.Ty),
 
     fn init(alloc: std.mem.Allocator) Emitter {
         return .{
@@ -34,6 +37,9 @@ const Emitter = struct {
             .loop_ctr = 0,
             .structs = .empty,
             .ptr_tmps = .empty,
+            .float_tmps = .empty,
+            .cur_ret_ty = .void_,
+            .func_ret_tys = .empty,
         };
     }
 
@@ -41,6 +47,8 @@ const Emitter = struct {
         self.strings.deinit(self.alloc);
         self.structs.deinit(self.alloc);
         self.ptr_tmps.deinit(self.alloc);
+        self.float_tmps.deinit(self.alloc);
+        self.func_ret_tys.deinit(self.alloc);
         self.out.deinit(self.alloc);
     }
 
@@ -346,9 +354,11 @@ const Emitter = struct {
                 const t = self.fresh();
                 try self.out.appendSlice(self.alloc, "  ");
                 try self.writeTmp(t);
+                const bits = @as(u64, @bitCast(f));
                 var buf: [64]u8 = undefined;
-                const s = std.fmt.bufPrint(&buf, " = fadd float 0.0, {d}\n", .{f}) catch unreachable;
+                const s = std.fmt.bufPrint(&buf, " = fadd double 0.0, 0x{X}\n", .{bits}) catch unreachable;
                 try self.out.appendSlice(self.alloc, s);
+                try self.float_tmps.put(self.alloc, t, {});
                 return .{ .tmp = t };
             },
             .cast => |c| {
@@ -357,21 +367,29 @@ const Emitter = struct {
                 try self.out.appendSlice(self.alloc, "  ");
                 try self.writeTmp(t);
                 switch (c.ty) {
-                    .int => try self.out.appendSlice(self.alloc, " = fptosi float "),
-                    .float_ => try self.out.appendSlice(self.alloc, " = fpext float "),
-                    .double_ => try self.out.appendSlice(self.alloc, " = fpext float "),
+                    .int => try self.out.appendSlice(self.alloc, " = fptosi double "),
+                    .float_, .double_ => try self.out.appendSlice(self.alloc, " = fadd double 0.0, "),
                     else => return error.UnsupportedCast,
                 }
                 try self.writeSlot(v);
                 switch (c.ty) {
                     .int => try self.out.appendSlice(self.alloc, " to i64\n"),
-                    .float_ => try self.out.appendSlice(self.alloc, " to float\n"),
-                    .double_ => try self.out.appendSlice(self.alloc, " to double\n"),
+                    .float_, .double_ => {
+                        try self.out.appendSlice(self.alloc, "\n");
+                        try self.float_tmps.put(self.alloc, t, {});
+                    },
                     else => unreachable,
                 }
                 return .{ .tmp = t };
             },
         }
+    }
+
+    fn slotIsFloat(self: *Emitter, s: Slot) bool {
+        return switch (s) {
+            .tmp => |id| self.float_tmps.contains(id),
+            else => false,
+        };
     }
 
     fn emitBinOp(self: *Emitter, b: lexer.BinOp, env: []Slot, comptime op: []const u8) anyerror!Slot {
@@ -380,6 +398,20 @@ const Emitter = struct {
         const t = self.fresh();
         try self.out.appendSlice(self.alloc, "  ");
         try self.writeTmp(t);
+        if (self.slotIsFloat(av) or self.slotIsFloat(bv)) {
+            const float_op: []const u8 = if (std.mem.indexOf(u8, op, "add") != null) " = fadd double "
+                else if (std.mem.indexOf(u8, op, "sub") != null) " = fsub double "
+                else if (std.mem.indexOf(u8, op, "mul") != null) " = fmul double "
+                else if (std.mem.indexOf(u8, op, "div") != null) " = fdiv double "
+                else op;
+            try self.out.appendSlice(self.alloc, float_op);
+            try self.writeSlot(av);
+            try self.out.appendSlice(self.alloc, ", ");
+            try self.writeSlot(bv);
+            try self.out.append(self.alloc, '\n');
+            try self.float_tmps.put(self.alloc, t, {});
+            return .{ .tmp = t };
+        }
         try self.out.appendSlice(self.alloc, op);
         try self.writeSlot(av);
         try self.out.appendSlice(self.alloc, ", ");
@@ -430,7 +462,11 @@ const Emitter = struct {
             slots_buf[i] = try self.emitExpr(a, env);
             is_ptr_buf[i] = self.isPtr(a, env);
         }
-        const ret_ty: []const u8 = if (std.mem.eql(u8, name, "puts")) "i32" else "i64";
+        const callee_ret = self.func_ret_tys.get(name);
+        const is_float_ret = callee_ret != null and (callee_ret.? == .float_ or callee_ret.? == .double_);
+        const ret_ty: []const u8 = if (std.mem.eql(u8, name, "puts")) "i32"
+            else if (is_float_ret) "double"
+            else "i64";
         const t = self.fresh();
         try self.out.appendSlice(self.alloc, "  ");
         try self.writeTmp(t);
@@ -441,36 +477,21 @@ const Emitter = struct {
         try self.out.append(self.alloc, '(');
         for (0..argc) |i| {
             if (i > 0) try self.out.appendSlice(self.alloc, ", ");
-            try self.out.appendSlice(self.alloc, if (is_ptr_buf[i]) "ptr " else "i64 ");
-            try self.writeSlot(slots_buf[i]);
+            const slot = slots_buf[i];
+            const arg_ty: []const u8 = if (is_ptr_buf[i]) "ptr"
+                else if (self.slotIsFloat(slot)) "double"
+                else "i64";
+            try self.out.appendSlice(self.alloc, arg_ty);
+            try self.out.append(self.alloc, ' ');
+            try self.writeSlot(slot);
         }
         try self.out.appendSlice(self.alloc, ")\n");
+        if (is_float_ret) try self.float_tmps.put(self.alloc, t, {});
         return .{ .tmp = t };
     }
 
     fn emitCallStmt(self: *Emitter, name: []const u8, arg_exprs: []*lexer.Expr, env: []Slot) !void {
-        var slots_buf: [16]Slot = undefined;
-        var is_ptr_buf: [16]bool = undefined;
-        const argc = arg_exprs.len;
-        for (arg_exprs, 0..) |a, i| {
-            slots_buf[i] = try self.emitExpr(a, env);
-            is_ptr_buf[i] = self.isPtr(a, env);
-        }
-        const ret_ty: []const u8 = if (std.mem.eql(u8, name, "puts")) "i32" else "i64";
-        const t = self.fresh();
-        try self.out.appendSlice(self.alloc, "  ");
-        try self.writeTmp(t);
-        try self.out.appendSlice(self.alloc, " = call ");
-        try self.out.appendSlice(self.alloc, ret_ty);
-        try self.out.appendSlice(self.alloc, " @");
-        try self.out.appendSlice(self.alloc, name);
-        try self.out.append(self.alloc, '(');
-        for (0..argc) |i| {
-            if (i > 0) try self.out.appendSlice(self.alloc, ", ");
-            try self.out.appendSlice(self.alloc, if (is_ptr_buf[i]) "ptr " else "i64 ");
-            try self.writeSlot(slots_buf[i]);
-        }
-        try self.out.appendSlice(self.alloc, ")\n");
+        _ = try self.emitCallExpr(name, arg_exprs, env);
     }
 
     fn emitStmt(self: *Emitter, stmt: *const lexer.Stmt, env: []Slot, func_name: []const u8) !void {
@@ -498,7 +519,8 @@ const Emitter = struct {
             .call => |c| try self.emitCallStmt(c.name, c.args.items, env),
             .ret => |e| {
                 const v = try self.emitExpr(e, env);
-                try self.out.appendSlice(self.alloc, "  ret i64 ");
+                const is_float = self.slotIsFloat(v);
+                try self.out.appendSlice(self.alloc, if (is_float) "  ret double " else "  ret i64 ");
                 try self.writeSlot(v);
                 try self.out.append(self.alloc, '\n');
             },
@@ -583,7 +605,9 @@ const Emitter = struct {
     }
 
     fn emitFunction(self: *Emitter, func: *const lexer.Function) !void {
-        const ret = if (func.ret_ty == .void_) "void" else "i64";
+        self.cur_ret_ty = func.ret_ty;
+        const is_float_ret = func.ret_ty == .float_ or func.ret_ty == .double_;
+        const ret = if (func.ret_ty == .void_) "void" else if (is_float_ret) "double" else "i64";
         try self.out.appendSlice(self.alloc, "define ");
         try self.out.appendSlice(self.alloc, ret);
         try self.out.appendSlice(self.alloc, " @");
@@ -600,7 +624,14 @@ const Emitter = struct {
             try self.out.appendSlice(self.alloc, " %");
             try self.out.appendSlice(self.alloc, p.name);
         }
-        try self.out.appendSlice(self.alloc, ") {\nentry:\n");
+        try self.out.appendSlice(self.alloc, ") {\n");
+
+        const has_entry_label = func.body.items.len > 0 and
+            func.body.items[0] == .label and
+            std.mem.eql(u8, func.body.items[0].label, "entry");
+        if (!has_entry_label) {
+            try self.out.appendSlice(self.alloc, "entry:\n");
+        }
 
         const env = try self.alloc.alloc(Slot, func.n_regs);
         defer self.alloc.free(env);
@@ -613,10 +644,13 @@ const Emitter = struct {
         const body_text = self.out.items[body_start..];
         const needs_ret = std.mem.indexOf(u8, body_text, "\n  ret ") == null and
             !std.mem.endsWith(u8, std.mem.trimRight(u8, body_text, "\n"), "  ret void") and
-            !std.mem.endsWith(u8, std.mem.trimRight(u8, body_text, "\n"), "  ret i64");
+            !std.mem.endsWith(u8, std.mem.trimRight(u8, body_text, "\n"), "  ret i64") and
+            !std.mem.endsWith(u8, std.mem.trimRight(u8, body_text, "\n"), "  ret double");
         if (needs_ret) {
             if (func.ret_ty == .void_) {
                 try self.out.appendSlice(self.alloc, "  ret void\n");
+            } else if (is_float_ret) {
+                try self.out.appendSlice(self.alloc, "  ret double 0.0\n");
             } else {
                 try self.out.appendSlice(self.alloc, "  ret i64 0\n");
             }
@@ -667,6 +701,10 @@ const Emitter = struct {
 
         for (program.structs.items) |*s| {
             try self.structs.put(self.alloc, s.name, s.fields.items);
+        }
+
+        for (program.functions.items) |*f| {
+            try self.func_ret_tys.put(self.alloc, f.name, f.ret_ty);
         }
 
         const func_start = self.out.items.len;
