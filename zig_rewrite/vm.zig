@@ -18,9 +18,11 @@ pub const TaskTable = struct {
     pub fn init(alloc: std.mem.Allocator) TaskTable {
         return .{ .mutex = .{}, .tasks = .empty, .alloc = alloc };
     }
+
     pub fn deinit(self: *TaskTable) void {
         self.tasks.deinit(self.alloc);
     }
+
     pub fn reserve(self: *TaskTable) !u32 {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -28,11 +30,13 @@ pub const TaskTable = struct {
         try self.tasks.append(self.alloc, .{ .thread = undefined, .state = .running, .result = .void_, .err = null });
         return id;
     }
+
     pub fn setThread(self: *TaskTable, id: u32, thread: std.Thread) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.tasks.items[id].thread = thread;
     }
+
     pub fn complete(self: *TaskTable, id: u32, result: Value, err: ?anyerror) void {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -40,6 +44,7 @@ pub const TaskTable = struct {
         self.tasks.items[id].err = err;
         self.tasks.items[id].state = .done;
     }
+
     pub fn join(self: *TaskTable, id: u32) !Value {
         self.mutex.lock();
         const thread = self.tasks.items[id].thread;
@@ -117,9 +122,11 @@ pub const Value = union(enum) {
             else => {},
         }
     }
+
     pub inline fn asInt(self: Value) i64 {
         return self.int;
     }
+
     pub inline fn asBool(self: Value) bool {
         return switch (self) {
             .bool_ => |b| b,
@@ -127,21 +134,25 @@ pub const Value = union(enum) {
             else => unreachable,
         };
     }
+
     pub inline fn isInt(self: Value) bool {
         return self == .int;
     }
 };
 
 pub const HeapCell = struct { value: Value };
+
 pub const HeapStruct = struct {
     name: []const u8,
     fields: std.StringArrayHashMap(HeapCell),
+
     pub fn deinit(self: *HeapStruct, alloc: std.mem.Allocator) void {
         var it = self.fields.iterator();
         while (it.next()) |entry| entry.value_ptr.value.deinit(alloc);
         self.fields.deinit();
     }
 };
+
 pub const HeapArray = struct {
     cells: []HeapCell,
     alloc: std.mem.Allocator,
@@ -150,6 +161,7 @@ pub const HeapArray = struct {
         self.alloc.free(self.cells);
     }
 };
+
 pub const BearArena = struct {
     inner: std.heap.ArenaAllocator,
     pub fn init(backing: std.mem.Allocator) BearArena {
@@ -230,14 +242,36 @@ pub const ArgRange = struct { start: u32, len: u16 };
 pub const PhiEntry = struct { pred_label_idx: u16, src_reg: u16 };
 
 pub const CompiledFn = struct {
+    /// The register count.
     n_regs: u16,
+
+    /// The instruction list.
     code: []Instr,
+
+    /// The int pool for VM storage.
     int_pool: []i64,
+
+    /// The float pool for VM storage.
     float_pool: []f64,
+
+    /// The string pool for VM storage.
     str_pool: [][]const u8,
+
+    /// The argument registers.
     arg_regs: []u16,
+
+    /// The argument ranges.
     arg_ranges: []ArgRange,
+
+    /// The phi tables.
     phi_tables: [][]PhiEntry,
+
+    /// True when this function never allocates heap Values (ptr/ref/struct/arena).
+    /// Lets callFuncByIdx skip the deinit loop entirely.
+    pure_int: bool,
+
+    /// Number of parameter registers that must be pre-zeroed before execution.
+    n_param_regs: u16,
 
     pub fn deinit(self: *CompiledFn, alloc: std.mem.Allocator) void {
         alloc.free(self.code);
@@ -270,6 +304,29 @@ const CallStack = struct {
         return self.buf[s..e];
     }
     inline fn pop(self: *CallStack, n: usize) void {
+        self.top -= n;
+    }
+};
+
+const INT_STACK_SLOTS: usize = 1 << 21;
+
+const IntStack = struct {
+    buf: []i64,
+    top: usize,
+    fn init(alloc: std.mem.Allocator) !IntStack {
+        return .{ .buf = try alloc.alloc(i64, INT_STACK_SLOTS), .top = 0 };
+    }
+    fn deinit(self: *IntStack, alloc: std.mem.Allocator) void {
+        alloc.free(self.buf);
+    }
+    inline fn push(self: *IntStack, n: usize) ![]i64 {
+        const s = self.top;
+        const e = s + n;
+        if (e > self.buf.len) return error.IntStackOverflow;
+        self.top = e;
+        return self.buf[s..e];
+    }
+    inline fn pop(self: *IntStack, n: usize) void {
         self.top -= n;
     }
 };
@@ -627,8 +684,42 @@ const Compiler = struct {
         }
     }
 
-    fn finish(self: *Compiler, n_regs: u16) !CompiledFn {
+    fn finish(self: *Compiler, n_regs: u16, n_param_regs: u16) !CompiledFn {
         const actual_n_regs: u16 = @max(n_regs, if (self.code.items.len == 0) 0 else self.max_reg + 1);
+
+        var pure_int = true;
+        for (self.code.items) |ins| {
+            switch (ins.op) {
+                .alloc_bytes,
+                .alloc_type,
+                .alloc_array,
+                .arena_create,
+                .arena_alloc,
+                .load_str,
+                .load_named,
+                .struct_lit,
+                .load_ref,
+                .store_ref,
+                .get_field_ref,
+                .get_index_ref,
+                .get_field,
+                .set_field,
+                .free_reg,
+                .arena_destroy,
+                .spawn,
+                .sync_task,
+                .call_builtin,
+                .call_builtin_void,
+                .load_float,
+                .cast,
+                => {
+                    pure_int = false;
+                    break;
+                },
+                else => {},
+            }
+        }
+
         return .{
             .n_regs = actual_n_regs,
             .code = try self.code.toOwnedSlice(self.alloc),
@@ -638,6 +729,8 @@ const Compiler = struct {
             .arg_regs = try self.arg_regs.toOwnedSlice(self.alloc),
             .arg_ranges = try self.arg_ranges.toOwnedSlice(self.alloc),
             .phi_tables = try self.phi_tables.toOwnedSlice(self.alloc),
+            .pure_int = pure_int,
+            .n_param_regs = n_param_regs,
         };
     }
 };
@@ -668,7 +761,29 @@ fn compileFunction(
     }
 
     try c.applyPatches();
-    return c.finish(func.n_regs);
+
+    const n_param_regs: u16 = @intCast(func.params.items.len);
+    return c.finish(func.n_regs, n_param_regs);
+}
+
+/// Propagate purity: A call_user to a non-pure callee taints the caller.
+fn propagatePurity(compiled: []CompiledFn) void {
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (compiled) |*cf| {
+            if (!cf.pure_int) continue;
+            for (cf.code) |ins| {
+                if (ins.op == .call_user or ins.op == .call_user_void) {
+                    if (!compiled[ins.a].pure_int) {
+                        cf.pure_int = false;
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub const Vm = struct {
@@ -683,6 +798,7 @@ pub const Vm = struct {
     alloc: std.mem.Allocator,
     tasks: ?*TaskTable,
     call_stack: CallStack,
+    int_stack: IntStack,
 
     pub fn init(program: *const lexer.Program, alloc: std.mem.Allocator) !Vm {
         const n = program.functions.items.len;
@@ -703,6 +819,8 @@ pub const Vm = struct {
         for (program.functions.items, 0..) |*f, i|
             compiled[i] = try compileFunction(f, &call_cache, alloc);
 
+        propagatePurity(compiled);
+
         return .{
             .program = program,
             .func_index = func_index,
@@ -715,6 +833,7 @@ pub const Vm = struct {
             .alloc = alloc,
             .tasks = null,
             .call_stack = try CallStack.init(alloc),
+            .int_stack = try IntStack.init(alloc),
         };
     }
 
@@ -742,6 +861,7 @@ pub const Vm = struct {
         }
         self.arenas.deinit(self.alloc);
         self.call_stack.deinit(self.alloc);
+        self.int_stack.deinit(self.alloc);
     }
 
     pub fn findFunc(self: *Vm, name: []const u8) ?*const lexer.Function {
@@ -767,8 +887,33 @@ pub const Vm = struct {
         };
     }
 
+    fn callFuncByIdxInt(self: *Vm, idx: u32, args_i64: []const i64) anyerror!Value {
+        const cf = &self.compiled[idx];
+        const func = &self.program.functions.items[idx];
+        const n = cf.n_regs;
+
+        const env = try self.int_stack.push(n);
+        defer self.int_stack.pop(n);
+
+        for (func.params.items, 0..) |param, i|
+            env[param.idx] = args_i64[i];
+
+        return self.execCompiledInt(cf, env);
+    }
+
     pub fn callFuncByIdx(self: *Vm, idx: u32, args: []Value) anyerror!Value {
         const cf = &self.compiled[idx];
+
+        if (cf.pure_int) {
+            var args_i64: [32]i64 = undefined;
+            for (args, 0..) |v, i| args_i64[i] = switch (v) {
+                .int => |n| n,
+                .bool_ => |b| if (b) 1 else 0,
+                else => return error.TypeMismatch,
+            };
+            return try self.callFuncByIdxInt(idx, args_i64[0..args.len]);
+        }
+
         const func = &self.program.functions.items[idx];
         const n = cf.n_regs;
 
@@ -787,6 +932,166 @@ pub const Vm = struct {
             env[param.idx] = args[i];
 
         return self.execCompiled(cf, env);
+    }
+
+    fn execCompiledInt(self: *Vm, cf: *const CompiledFn, env: []i64) anyerror!Value {
+        const code = cf.code;
+        const int_pool = cf.int_pool;
+        const arg_regs = cf.arg_regs;
+        const arg_ranges = cf.arg_ranges;
+        const phi_tables = cf.phi_tables;
+
+        var pc: usize = 0;
+        var cur_label_idx: u16 = std.math.maxInt(u16);
+        var prev_label_idx: u16 = std.math.maxInt(u16);
+        var bool_regs: u64 = 0;
+
+        while (true) {
+            const ins = code[pc];
+            switch (ins.op) {
+                .load_int => {
+                    env[ins.dst] = int_pool[ins.a];
+                    if (ins.dst < 64) bool_regs &= ~(@as(u64, 1) << @intCast(ins.dst));
+                    pc += 1;
+                },
+                .move => {
+                    env[ins.dst] = env[ins.a];
+                    if (ins.dst < 64 and ins.a < 64) {
+                        const src_bit = (bool_regs >> @intCast(ins.a)) & 1;
+                        bool_regs = (bool_regs & ~(@as(u64, 1) << @intCast(ins.dst))) |
+                            (src_bit << @intCast(ins.dst));
+                    } else if (ins.dst < 64) {
+                        bool_regs &= ~(@as(u64, 1) << @intCast(ins.dst));
+                    }
+                    pc += 1;
+                },
+                .add => {
+                    const a = if (ins.flag & 0x01 != 0) int_pool[ins.a] else env[ins.a];
+                    const b = if (ins.flag & 0x02 != 0) int_pool[ins.b] else env[ins.b];
+                    env[ins.dst] = a +% b;
+                    if (ins.dst < 64) bool_regs &= ~(@as(u64, 1) << @intCast(ins.dst));
+                    pc += 1;
+                },
+                .sub => {
+                    const a = if (ins.flag & 0x01 != 0) int_pool[ins.a] else env[ins.a];
+                    const b = if (ins.flag & 0x02 != 0) int_pool[ins.b] else env[ins.b];
+                    env[ins.dst] = a -% b;
+                    if (ins.dst < 64) bool_regs &= ~(@as(u64, 1) << @intCast(ins.dst));
+                    pc += 1;
+                },
+                .mul => {
+                    const a = if (ins.flag & 0x01 != 0) int_pool[ins.a] else env[ins.a];
+                    const b = if (ins.flag & 0x02 != 0) int_pool[ins.b] else env[ins.b];
+                    env[ins.dst] = a *% b;
+                    if (ins.dst < 64) bool_regs &= ~(@as(u64, 1) << @intCast(ins.dst));
+                    pc += 1;
+                },
+                .div => {
+                    const a = if (ins.flag & 0x01 != 0) int_pool[ins.a] else env[ins.a];
+                    const b = if (ins.flag & 0x02 != 0) int_pool[ins.b] else env[ins.b];
+                    if (b == 0) return error.DivisionByZero;
+                    env[ins.dst] = @divTrunc(a, b);
+                    if (ins.dst < 64) bool_regs &= ~(@as(u64, 1) << @intCast(ins.dst));
+                    pc += 1;
+                },
+                .lt => {
+                    const a = if (ins.flag & 0x01 != 0) int_pool[ins.a] else env[ins.a];
+                    const b = if (ins.flag & 0x02 != 0) int_pool[ins.b] else env[ins.b];
+                    env[ins.dst] = if (a < b) 1 else 0;
+                    if (ins.dst < 64) bool_regs |= (@as(u64, 1) << @intCast(ins.dst));
+                    pc += 1;
+                },
+                .gt => {
+                    const a = if (ins.flag & 0x01 != 0) int_pool[ins.a] else env[ins.a];
+                    const b = if (ins.flag & 0x02 != 0) int_pool[ins.b] else env[ins.b];
+                    env[ins.dst] = if (a > b) 1 else 0;
+                    if (ins.dst < 64) bool_regs |= (@as(u64, 1) << @intCast(ins.dst));
+                    pc += 1;
+                },
+                .le => {
+                    const a = if (ins.flag & 0x01 != 0) int_pool[ins.a] else env[ins.a];
+                    const b = if (ins.flag & 0x02 != 0) int_pool[ins.b] else env[ins.b];
+                    env[ins.dst] = if (a <= b) 1 else 0;
+                    if (ins.dst < 64) bool_regs |= (@as(u64, 1) << @intCast(ins.dst));
+                    pc += 1;
+                },
+                .ge => {
+                    const a = if (ins.flag & 0x01 != 0) int_pool[ins.a] else env[ins.a];
+                    const b = if (ins.flag & 0x02 != 0) int_pool[ins.b] else env[ins.b];
+                    env[ins.dst] = if (a >= b) 1 else 0;
+                    if (ins.dst < 64) bool_regs |= (@as(u64, 1) << @intCast(ins.dst));
+                    pc += 1;
+                },
+                .eq_val => {
+                    env[ins.dst] = if (env[ins.a] == env[ins.b]) 1 else 0;
+                    if (ins.dst < 64) bool_regs |= (@as(u64, 1) << @intCast(ins.dst));
+                    pc += 1;
+                },
+                .set_label => {
+                    cur_label_idx = ins.dst;
+                    pc += 1;
+                },
+                .jmp => {
+                    prev_label_idx = cur_label_idx;
+                    pc = ins.a;
+                },
+                .br_if => {
+                    prev_label_idx = cur_label_idx;
+                    pc = if (env[ins.dst] != 0) ins.a else ins.b;
+                },
+                .ret => {
+                    const raw = env[ins.dst];
+                    const is_bool = ins.dst < 64 and (bool_regs >> @intCast(ins.dst)) & 1 != 0;
+                    return if (is_bool) .{ .bool_ = raw != 0 } else .{ .int = raw };
+                },
+                .ret_void => return .void_,
+                .phi => {
+                    const entries = phi_tables[ins.a];
+                    var found = false;
+                    for (entries) |e| {
+                        if (e.pred_label_idx == prev_label_idx) {
+                            env[ins.dst] = env[e.src_reg];
+                            // Propagate bool tag through phi.
+                            if (ins.dst < 64 and e.src_reg < 64) {
+                                const src_bit = (bool_regs >> @intCast(e.src_reg)) & 1;
+                                bool_regs = (bool_regs & ~(@as(u64, 1) << @intCast(ins.dst))) |
+                                    (src_bit << @intCast(ins.dst));
+                            }
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) return error.PhiNoMatchingArm;
+                    pc += 1;
+                },
+                .call_user, .call_user_void => {
+                    const ar = arg_ranges[ins.b];
+                    var buf: [32]i64 = undefined;
+                    for (0..ar.len) |i| buf[i] = env[arg_regs[ar.start + i]];
+                    const result = try self.callFuncByIdxInt(ins.a, buf[0..ar.len]);
+                    if (ins.op == .call_user) {
+                        switch (result) {
+                            .int => |n| {
+                                env[ins.dst] = n;
+                                if (ins.dst < 64) bool_regs &= ~(@as(u64, 1) << @intCast(ins.dst));
+                            },
+                            .bool_ => |b| {
+                                env[ins.dst] = if (b) 1 else 0;
+                                if (ins.dst < 64) bool_regs |= (@as(u64, 1) << @intCast(ins.dst));
+                            },
+                            .void_ => {
+                                env[ins.dst] = 0;
+                                if (ins.dst < 64) bool_regs &= ~(@as(u64, 1) << @intCast(ins.dst));
+                            },
+                            else => return error.NotPureInt,
+                        }
+                    }
+                    pc += 1;
+                },
+                // Anything else shouldn't appear in a pure_int function.
+                else => return error.NotPureInt,
+            }
+        }
     }
 
     fn execCompiled(self: *Vm, cf: *const CompiledFn, env: []Value) anyerror!Value {
