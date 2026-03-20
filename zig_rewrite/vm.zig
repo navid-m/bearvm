@@ -369,6 +369,7 @@ const Compiler = struct {
             .max_reg = 0,
         };
     }
+
     fn deinit(self: *Compiler) void {
         self.code.deinit(self.alloc);
         self.int_pool.deinit(self.alloc);
@@ -389,11 +390,13 @@ const Compiler = struct {
         try self.int_pool.append(self.alloc, n);
         return idx;
     }
+
     fn floatIdx(self: *Compiler, f: f64) !u16 {
         const idx: u16 = @intCast(self.float_pool.items.len);
         try self.float_pool.append(self.alloc, f);
         return idx;
     }
+
     fn strIdx(self: *Compiler, s: []const u8) !u16 {
         for (self.str_pool.items, 0..) |v, i| if (std.mem.eql(u8, v, s)) return @intCast(i);
         const idx: u16 = @intCast(self.str_pool.items.len);
@@ -412,7 +415,6 @@ const Compiler = struct {
         switch (expr.*) {
             .reg => |r| return r,
             .const_ => |inner| return self.compileExpr(inner, scratch),
-
             .int => |n| {
                 const idx = try self.intIdx(n);
                 _ = try self.emit(.{ .op = .load_int, .flag = 0, .dst = scratch, .a = idx, .b = 0 });
@@ -433,16 +435,13 @@ const Compiler = struct {
                 _ = try self.emit(.{ .op = .load_named, .flag = 0, .dst = scratch, .a = idx, .b = 0 });
                 return scratch;
             },
-
             .add, .sub, .mul, .div, .lt, .gt, .le, .ge => return self.compileBinOp(expr, scratch),
-
             .eq => |op| {
                 const ra = try self.compileExpr(op.a, scratch);
                 const rb = try self.compileExpr(op.b, if (ra == scratch) scratch +% 1 else scratch);
                 _ = try self.emit(.{ .op = .eq_val, .flag = 0, .dst = scratch, .a = ra, .b = rb });
                 return scratch;
             },
-
             .call => |c| {
                 const ar_idx = try self.buildArgRange(c.args.items, scratch);
                 const target = self.call_cache.get(c.name) orelse return error.UndefinedFunction;
@@ -452,13 +451,11 @@ const Compiler = struct {
                 }
                 return scratch;
             },
-
             .field => |f| {
                 const idx = try self.strIdx(f.field);
                 _ = try self.emit(.{ .op = .get_field, .flag = 0, .dst = scratch, .a = f.reg, .b = idx });
                 return scratch;
             },
-
             .alloc => |size_expr| {
                 const ra = try self.compileExpr(size_expr, scratch);
                 _ = try self.emit(.{ .op = .alloc_bytes, .flag = 0, .dst = scratch, .a = ra, .b = 0 });
