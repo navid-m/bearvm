@@ -106,6 +106,7 @@ const Emitter = struct {
                 var buf: [64]u8 = undefined;
                 const line = std.fmt.bufPrint(&buf, " = getelementptr inbounds [{d} x i8], ptr @.str{d}, i64 0, i64 0\n", .{ s.len + 1, idx }) catch unreachable;
                 try self.out.appendSlice(self.alloc, line);
+                try self.ptr_tmps.put(self.alloc, t, {});
                 return .{ .tmp = t };
             },
             .reg => |r| return env[r],
@@ -603,6 +604,8 @@ const Emitter = struct {
     fn emitDeclarations(self: *Emitter) !void {
         try self.out.appendSlice(self.alloc,
             \\declare i32 @puts(ptr)
+            \\declare void @putf(i64)
+            \\declare void @flush()
             \\declare i64 @open(ptr, i64)
             \\declare i64 @read(i64, ptr, i64)
             \\declare i64 @write(i64, ptr, i64)

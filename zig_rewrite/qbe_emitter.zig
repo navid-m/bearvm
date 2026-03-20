@@ -131,6 +131,7 @@ const Emitter = struct {
                 var buf: [32]u8 = undefined;
                 const line = std.fmt.bufPrint(&buf, " =l copy $str{d}\n", .{idx}) catch unreachable;
                 try self.out.appendSlice(self.alloc, line);
+                try self.ptr_tmps.put(self.alloc, t, {});
                 return .{ .tmp = t };
             },
             .reg => |r| return env[r],

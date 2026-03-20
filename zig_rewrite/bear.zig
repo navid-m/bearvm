@@ -129,6 +129,24 @@ fn loadProgram(path: []const u8, alloc: std.mem.Allocator) bear_lexer.Program {
     };
 }
 
+const bear_runtime_c =
+    \\#include <stdio.h>
+    \\#include <stdint.h>
+    \\void putf(int64_t n) { printf("%lld\n", (long long)n); }
+    \\void flush(void) { fflush(stdout); }
+    \\
+;
+
+fn writeRuntime(alloc: std.mem.Allocator) []const u8 {
+    const rt_path = "/tmp/bear_runtime.c";
+    std.fs.cwd().writeFile(.{ .sub_path = rt_path, .data = bear_runtime_c }) catch |e| {
+        std.debug.print("Failed to write runtime: {}\n", .{e});
+        std.process.exit(1);
+    };
+    _ = alloc;
+    return rt_path;
+}
+
 fn runQbe(program: *const bear_lexer.Program, path: []const u8, compile: bool, alloc: std.mem.Allocator) void {
     const ir = bear_qbe.emit(program, alloc) catch |e| {
         std.debug.print("QBE codegen error: {}\n", .{e});
@@ -151,7 +169,8 @@ fn runQbe(program: *const bear_lexer.Program, path: []const u8, compile: bool, a
     };
 
     runCmd(alloc, &.{ "qbe", "-o", asm_path, ir_path }, "qbe");
-    runCmd(alloc, &.{ "cc", asm_path, "-o", out_path }, "cc");
+    const rt_path = writeRuntime(alloc);
+    runCmd(alloc, &.{ "cc", asm_path, rt_path, "-o", out_path }, "cc");
     std.debug.print("Compiled to {s}\n", .{out_path});
 }
 
@@ -175,7 +194,8 @@ fn runLlvm(program: *const bear_lexer.Program, path: []const u8, compile: bool, 
         std.process.exit(1);
     };
 
-    runCmd(alloc, &.{ "clang", ir_path, "-o", out_path }, "clang");
+    const rt_path = writeRuntime(alloc);
+    runCmd(alloc, &.{ "clang", ir_path, rt_path, "-o", out_path }, "clang");
     std.debug.print("Compiled to {s}\n", .{out_path});
 }
 

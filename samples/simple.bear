@@ -4,10 +4,11 @@
 
 @main(): int {
 	%0 = const 10
-	call puts(%0)
+	call putf(%0)
 	%1 = const "Hello, world."
 	call puts(%1)
 	call puts("Hi there.")
 	call other_func
+	call flush()
 	ret 0
 }
