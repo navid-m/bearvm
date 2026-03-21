@@ -147,7 +147,7 @@ fn printUsage() void {
         \\  qbe  <file.bear>                 Emit QBE IR
         \\  qbe  <file.bear> -c              Compile with QBE + cc
         \\  llvm <file.bear>                 Emit LLVM IR
-        \\  llvm <file.bear> -c              Compile with llc + cc
+        \\  llvm <file.bear> -c              Compile with Clang
         \\  version                          Show version and quit
     , .{});
 }
