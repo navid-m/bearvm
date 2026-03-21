@@ -1,3 +1,6 @@
+//! The lexer module provides a top-level `tokenize` function that converts
+//! a source string into a stream of tokens.
+
 const std = @import("std");
 const bear_main = @import("../bear.zig");
 
