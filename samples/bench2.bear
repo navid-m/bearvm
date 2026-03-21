@@ -1,0 +1,59 @@
+struct Point {
+    x: int
+    y: int
+}
+
+@main(): int {
+    %n = const 1000000
+    %arr = alloc_array Point, %n
+    %i = const 0
+
+fill_cond:
+    %cond = lt %i, %n
+    br_if %cond, fill_body, fill_end
+
+fill_body:
+
+    %p = get_index_ref %arr, %i
+
+    %x_ref = get_field_ref %p, x
+
+    %y_ref = get_field_ref %p, y
+
+    store %x_ref, %i
+    %y_val = mul %i, 2
+    store %y_ref, %y_val
+
+    %i = add %i, 1
+    jmp fill_cond
+
+fill_end:
+
+    ; sum
+    %sum = const 0
+    %j = const 0
+
+sum_cond:
+    %cond2 = lt %j, %n
+    br_if %cond2, sum_body, sum_end
+
+sum_body:
+    %p2 = get_index_ref %arr, %j
+
+    %x_ref2 = get_field_ref %p2, x
+    %y_ref2 = get_field_ref %p2, y
+
+    %x = load %x_ref2
+    %y = load %y_ref2
+
+    %tmp = add %x, %y
+    %sum = add %sum, %tmp
+
+    %j = add %j, 1
+    jmp sum_cond
+
+sum_end:
+    call puts(%sum)
+    call flush()
+    ret 0
+}
