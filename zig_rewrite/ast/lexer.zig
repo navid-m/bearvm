@@ -162,6 +162,7 @@ pub fn keywordToken(word: []const u8) ?Token {
     return null;
 }
 
+/// Free some tokens allocated by the lexer.
 pub fn freeTokenSlice(tokens: []Token, alloc: std.mem.Allocator) void {
     for (tokens) |tok| {
         if (tok == .str) alloc.free(tok.str);
@@ -169,6 +170,7 @@ pub fn freeTokenSlice(tokens: []Token, alloc: std.mem.Allocator) void {
     alloc.free(tokens);
 }
 
+/// Free all tokens in an arraylist of tokens.
 pub fn freeTokens(tokens: std.ArrayList(Token), alloc: std.mem.Allocator) void {
     for (tokens.items) |tok| {
         if (tok == .str) alloc.free(tok.str);
