@@ -368,10 +368,19 @@ const Emitter = struct {
         try self.out.appendSlice(self.alloc, ")\n");
     }
 
-    fn emitStmt(self: *Emitter, stmt: *const lexer.Stmt, env: []Slot) !void {
+    fn emitStmt(self: *Emitter, stmt: *const lexer.Stmt, env: []Slot, phi_pre_alloc: *std.AutoHashMapUnmanaged(lexer.RegIdx, TmpId)) !void {
         switch (stmt.*) {
             .assign => |a| {
-                env[a.reg] = try self.emitExpr(a.expr, env);
+                const result = try self.emitExpr(a.expr, env);
+                if (phi_pre_alloc.get(a.reg)) |pre| {
+                    try self.out.appendSlice(self.alloc, "  ");
+                    try self.writeTmp(pre);
+                    try self.out.appendSlice(self.alloc, " =w copy ");
+                    try self.writeSlot(result);
+                    try self.out.append(self.alloc, '\n');
+                } else {
+                    env[a.reg] = result;
+                }
             },
             .set_field => |sf| {
                 const base = env[sf.reg];
@@ -412,7 +421,7 @@ const Emitter = struct {
                 try self.writeSlot(cv);
                 const jmp = std.fmt.bufPrint(&buf, ", @lbody{d}, @lend{d}\n@lbody{d}\n", .{ lc, lc, lc }) catch unreachable;
                 try self.out.appendSlice(self.alloc, jmp);
-                for (wh.body.items) |*s| try self.emitStmt(s, env);
+                for (wh.body.items) |*s| try self.emitStmt(s, env, phi_pre_alloc);
                 const tail = std.fmt.bufPrint(&buf, "  jmp @loop{d}\n@lend{d}\n", .{ lc, lc }) catch unreachable;
                 try self.out.appendSlice(self.alloc, tail);
             },
@@ -473,7 +482,24 @@ const Emitter = struct {
         @memset(env, .undef);
         for (func.params.items) |p| env[p.idx] = .{ .param = p.name };
 
-        for (func.body.items) |*s| try self.emitStmt(s, env);
+        var phi_pre_alloc = std.AutoHashMapUnmanaged(lexer.RegIdx, TmpId){};
+        defer phi_pre_alloc.deinit(self.alloc);
+        for (func.body.items) |*s| {
+            if (s.* == .assign) {
+                const expr = s.assign.expr;
+                if (expr.* == .phi) {
+                    for (expr.phi.items) |arm| {
+                        if (env[arm.reg] == .undef) {
+                            const pre = self.fresh();
+                            env[arm.reg] = .{ .tmp = pre };
+                            try phi_pre_alloc.put(self.alloc, arm.reg, pre);
+                        }
+                    }
+                }
+            }
+        }
+
+        for (func.body.items) |*s| try self.emitStmt(s, env, &phi_pre_alloc);
 
         const last = std.mem.trimRight(u8, self.out.items, "\n");
         const needs_ret = !std.mem.endsWith(u8, last, "ret") and
