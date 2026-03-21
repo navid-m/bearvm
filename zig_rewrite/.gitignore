@@ -2,3 +2,4 @@
 zig-out
 *.pdb
 .DS_Store
+*.exe
