@@ -291,6 +291,7 @@ pub const CompiledFn = struct {
 };
 
 const CALL_STACK_SLOTS: usize = 1 << 20;
+const MAX_CALL_DEPTH: usize = 1000;
 
 const CallStack = struct {
     buf: []Value,
@@ -820,6 +821,7 @@ pub const Vm = struct {
     tasks: ?*TaskTable,
     call_stack: CallStack,
     int_stack: IntStack,
+    call_depth: usize,
 
     pub fn init(program: *const lexer.Program, alloc: std.mem.Allocator) !Vm {
         const n = program.functions.items.len;
@@ -855,6 +857,7 @@ pub const Vm = struct {
             .tasks = null,
             .call_stack = try CallStack.init(alloc),
             .int_stack = try IntStack.init(alloc),
+            .call_depth = 0,
         };
     }
 
@@ -1085,6 +1088,9 @@ pub const Vm = struct {
                     pc += 1;
                 },
                 .call_user, .call_user_void => {
+                    if (self.call_depth >= MAX_CALL_DEPTH) return error.CallDepthExceeded;
+                    self.call_depth += 1;
+                    defer self.call_depth -= 1;
                     const ar = arg_ranges[ins.b];
                     var buf: [32]i64 = undefined;
                     for (0..ar.len) |i| buf[i] = env[arg_regs[ar.start + i]];
@@ -1246,6 +1252,9 @@ pub const Vm = struct {
                 },
 
                 .call_user, .call_user_void => {
+                    if (self.call_depth >= MAX_CALL_DEPTH) return error.CallDepthExceeded;
+                    self.call_depth += 1;
+                    defer self.call_depth -= 1;
                     const ar = arg_ranges[ins.b];
                     var buf: [32]Value = undefined;
                     for (0..ar.len) |i| buf[i] = env[arg_regs[ar.start + i]];
