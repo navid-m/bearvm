@@ -93,8 +93,30 @@ pub fn main() !void {
         return;
     }
 
-    const src = std.fs.cwd().readFileAlloc(alloc, first, 10 * 1024 * 1024) catch |e| {
-        std.debug.print("Error reading {s}: {}\n", .{ first, e });
+    var max_call_depth: usize = 1000;
+    var file_path: ?[]const u8 = null;
+
+    var i: usize = 1;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        if (std.mem.startsWith(u8, arg, "--max-call-depth=")) {
+            const val_str = arg["--max-call-depth=".len..];
+            max_call_depth = std.fmt.parseInt(usize, val_str, 10) catch {
+                std.debug.print("Invalid value for --max-call-depth\n", .{});
+                std.process.exit(1);
+            };
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            file_path = arg;
+        }
+    }
+
+    if (file_path == null) {
+        printUsage();
+        std.process.exit(1);
+    }
+
+    const src = std.fs.cwd().readFileAlloc(alloc, file_path.?, 10 * 1024 * 1024) catch |e| {
+        std.debug.print("Error reading {s}: {}\n", .{ file_path.?, e });
         std.process.exit(1);
     };
 
@@ -108,7 +130,7 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    bear_vm.run(&program, alloc) catch |e| {
+    bear_vm.run(&program, alloc, max_call_depth) catch |e| {
         std.debug.print("Runtime error: {}\n", .{e});
         std.process.exit(1);
     };
@@ -116,16 +138,17 @@ pub fn main() !void {
 
 fn printUsage() void {
     std.debug.print(
-        \\Usage:
+        \\Usage: bear <options> <file.bear>
         \\
-        \\  bear      <file.bear>          Run via interpreter
-        \\  bear ast  <file.bear>          Print AST as unicode tree
-        \\  bear jit  <file.bear>          JIT compile and run
-        \\  bear qbe  <file.bear>          Emit QBE IR
-        \\  bear qbe  <file.bear> -c       Compile with QBE + cc
-        \\  bear llvm <file.bear>          Emit LLVM IR
-        \\  bear llvm <file.bear> -c       Compile with llc + cc
-        \\  bear version                   Show version and quit
+        \\  <file.bear>                      Run via interpreter
+        \\  <file.bear> [--max-call-depth=n] Set maximum call depth (default: 1000)
+        \\  ast  <file.bear>                 Print AST as unicode tree
+        \\  jit  <file.bear>                 JIT compile and run
+        \\  qbe  <file.bear>                 Emit QBE IR
+        \\  qbe  <file.bear> -c              Compile with QBE + cc
+        \\  llvm <file.bear>                 Emit LLVM IR
+        \\  llvm <file.bear> -c              Compile with llc + cc
+        \\  version                          Show version and quit
     , .{});
 }
 
@@ -244,7 +267,7 @@ fn evalMain(src: []const u8, alloc: std.mem.Allocator) !bear_vm.Value {
         return err;
     };
     defer prog.deinit(alloc);
-    var vm = try bear_vm.Vm.init(&prog, alloc);
+    var vm = try bear_vm.Vm.init(&prog, alloc, 1000);
     defer vm.deinit();
     const main_fn = vm.findFunc("main") orelse return error.NoMainFunction;
     const main_idx = vm.func_index.get("main") orelse return error.NoMainFunction;
@@ -607,7 +630,7 @@ test "interpreter: no main is error" {
     const list = try bear_lexer.tokenize("@other: void { ret 0 }", alloc);
     var prog = try bear_parser.parse(list.items, list, alloc);
     defer prog.deinit(alloc);
-    var vm = try bear_vm.Vm.init(&prog, alloc);
+    var vm = try bear_vm.Vm.init(&prog, alloc, 1000);
     defer vm.deinit();
     try std.testing.expect(vm.findFunc("main") == null);
 }

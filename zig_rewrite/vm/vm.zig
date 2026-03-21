@@ -72,7 +72,7 @@ fn spawnEntry(sa: *SpawnArgs) void {
     defer arena.deinit();
     const alloc = arena.allocator();
     defer sa.alloc.destroy(sa);
-    var vm = Vm.init(sa.program, alloc) catch |e| {
+    var vm = Vm.init(sa.program, alloc, 1000) catch |e| {
         sa.tasks.complete(sa.task_id, .void_, e);
         sa.alloc.free(sa.args);
         return;
@@ -88,10 +88,10 @@ fn spawnEntry(sa: *SpawnArgs) void {
     sa.tasks.complete(sa.task_id, result, null);
 }
 
-pub fn run(program: *const lexer.Program, alloc: std.mem.Allocator) !void {
+pub fn run(program: *const lexer.Program, alloc: std.mem.Allocator, max_call_depth: usize) !void {
     var tasks = TaskTable.init(alloc);
     defer tasks.deinit();
-    var vm = try Vm.init(program, alloc);
+    var vm = try Vm.init(program, alloc, max_call_depth);
     defer vm.deinit();
     vm.tasks = &tasks;
     const main_idx = vm.func_index.get("main") orelse return error.NoMainFunction;
@@ -291,7 +291,6 @@ pub const CompiledFn = struct {
 };
 
 const CALL_STACK_SLOTS: usize = 1 << 20;
-const MAX_CALL_DEPTH: usize = 1000;
 
 const CallStack = struct {
     buf: []Value,
@@ -822,8 +821,9 @@ pub const Vm = struct {
     call_stack: CallStack,
     int_stack: IntStack,
     call_depth: usize,
+    max_call_depth: usize,
 
-    pub fn init(program: *const lexer.Program, alloc: std.mem.Allocator) !Vm {
+    pub fn init(program: *const lexer.Program, alloc: std.mem.Allocator, max_call_depth: usize) !Vm {
         const n = program.functions.items.len;
 
         var func_index = std.StringHashMapUnmanaged(u32){};
@@ -858,6 +858,7 @@ pub const Vm = struct {
             .call_stack = try CallStack.init(alloc),
             .int_stack = try IntStack.init(alloc),
             .call_depth = 0,
+            .max_call_depth = max_call_depth,
         };
     }
 
@@ -1088,7 +1089,7 @@ pub const Vm = struct {
                     pc += 1;
                 },
                 .call_user, .call_user_void => {
-                    if (self.call_depth >= MAX_CALL_DEPTH) return error.CallDepthExceeded;
+                    if (self.call_depth >= self.max_call_depth) return error.CallDepthExceeded;
                     self.call_depth += 1;
                     defer self.call_depth -= 1;
                     const ar = arg_ranges[ins.b];
@@ -1252,7 +1253,7 @@ pub const Vm = struct {
                 },
 
                 .call_user, .call_user_void => {
-                    if (self.call_depth >= MAX_CALL_DEPTH) return error.CallDepthExceeded;
+                    if (self.call_depth >= self.max_call_depth) return error.CallDepthExceeded;
                     self.call_depth += 1;
                     defer self.call_depth -= 1;
                     const ar = arg_ranges[ins.b];
