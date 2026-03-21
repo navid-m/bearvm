@@ -1,0 +1,91 @@
+struct Point {
+    x: int
+    y: int
+}
+
+@main(): int {
+entry:
+    %n = const 1000000                  ; or whatever n you want to test
+
+    %arr = alloc_array Point, %n
+
+    ; ──────────────── Fill phase ────────────────
+    %i_fill = const 0
+
+fill_cond:
+    %fill_continue = lt %i_fill, %n
+    br_if %fill_continue, fill_body, fill_done
+
+fill_body:
+    %p_ref = get_index_ref %arr, %i_fill
+
+    %x_ref = get_field_ref %p_ref, x
+    %y_ref = get_field_ref %p_ref, y
+
+    store %x_ref, %i_fill               ; x = i
+    %y_val  = mul %i_fill, 2
+    store %y_ref, %y_val                ; y = i * 2
+
+    %i_fill_next = add %i_fill, 1
+    %i_fill = %i_fill_next
+    jmp fill_cond
+
+fill_done:
+
+    ; ──────────────── Transform phase ────────────────
+    %i_trans = const 0
+
+trans_cond:
+    %trans_continue = lt %i_trans, %n
+    br_if %trans_continue, trans_body, trans_done
+
+trans_body:
+    %p2_ref = get_index_ref %arr, %i_trans
+
+    %x2_ref = get_field_ref %p2_ref, x
+    %y2_ref = get_field_ref %p2_ref, y
+
+    %x_old = load %x2_ref
+    %y_old = load %y2_ref
+    %x_new = add %x_old, %y_old           ; x += y
+
+    store %x2_ref, %x_new
+
+    %i_trans_next = add %i_trans, 1
+    %i_trans = %i_trans_next
+    jmp trans_cond
+
+trans_done:
+
+    ; ──────────────── Sum phase ────────────────
+    %sum = const 0
+    %i_sum = const 0
+
+sum_cond:
+    %sum_continue = lt %i_sum, %n
+    br_if %sum_continue, sum_body, sum_done
+
+sum_body:
+    %p3_ref = get_index_ref %arr, %i_sum
+
+    %x3_ref = get_field_ref %p3_ref, x
+    %y3_ref = get_field_ref %p3_ref, y
+
+    %x_val = load %x3_ref
+    %y_val = load %y3_ref
+    %pair_sum = add %x_val, %y_val
+
+    %sum_next = add %sum, %pair_sum
+    %sum = %sum_next
+
+    %i_sum_next = add %i_sum, 1
+    %i_sum = %i_sum_next
+    jmp sum_cond
+
+sum_done:
+
+    call puts(%sum)
+    call flush()
+
+    ret 0
+}
