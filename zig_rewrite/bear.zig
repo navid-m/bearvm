@@ -7,7 +7,20 @@ const bear_ast = @import("./ast/ast_printer.zig");
 const bear_vm = @import("./vm/vm.zig");
 const bear_qbe = @import("./codegen/qbe_emitter.zig");
 const bear_llvm = @import("./codegen/llvm_emitter.zig");
-const bear_jit = @import("./codegen/jit.zig");
+
+const is_apple_silicon = @import("builtin").target.cpu.arch.isAARCH64();
+
+const bear_jit = if (is_apple_silicon) @import("./codegen/jit.zig") else struct {
+    pub fn run(program: *const bear_lexer.Program, alloc: std.mem.Allocator) !void {
+        _ = program;
+        _ = alloc;
+        std.debug.print(
+            \\JIT is only supported on Apple Silicon (macOS AArch64).
+            \\Use the interpreter, LLVM, or QBE targets instead.
+        , .{});
+        std.process.exit(1);
+    }
+};
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
