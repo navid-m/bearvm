@@ -1,3 +1,8 @@
+//! The parser module provides a top-level `parse` function that converts
+//! a stream of tokens into an AST.
+//!
+//! It's responsible for parsing the tokens into a structured AST representation.
+
 const std = @import("std");
 const lexer = @import("lexer.zig");
 
