@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const lexer = @import("lexer.zig");
+const lexer = @import("../ast/lexer.zig");
 
 const TmpId = u32;
 

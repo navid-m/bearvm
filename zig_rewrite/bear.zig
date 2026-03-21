@@ -1,13 +1,13 @@
 //! Bear VM - Zig rewrite (Zig 0.15.2)
 
 const std = @import("std");
-const bear_lexer = @import("lexer.zig");
-const bear_parser = @import("parser.zig");
-const bear_vm = @import("vm.zig");
-const bear_qbe = @import("qbe_emitter.zig");
-const bear_llvm = @import("llvm_emitter.zig");
-const bear_ast = @import("ast_printer.zig");
-const bear_jit = @import("jit.zig");
+const bear_lexer = @import("./ast/lexer.zig");
+const bear_parser = @import("./ast/parser.zig");
+const bear_ast = @import("./ast/ast_printer.zig");
+const bear_vm = @import("./vm/vm.zig");
+const bear_qbe = @import("./codegen/qbe_emitter.zig");
+const bear_llvm = @import("./codegen/llvm_emitter.zig");
+const bear_jit = @import("./codegen/jit.zig");
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);

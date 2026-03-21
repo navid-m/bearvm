@@ -2,7 +2,7 @@
 //! QBE IL reference: https://c9x.me/compile/doc/il.html
 
 const std = @import("std");
-const lexer = @import("lexer.zig");
+const lexer = @import("../ast/lexer.zig");
 
 const TmpId = u32;
 

@@ -1,5 +1,5 @@
 const std = @import("std");
-const bear_main = @import("bear.zig");
+const bear_main = @import("../bear.zig");
 
 pub const TokenTag = enum(u8) {
     int,

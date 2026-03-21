@@ -1,5 +1,5 @@
 const std = @import("std");
-const lexer = @import("lexer.zig");
+const lexer = @import("../ast/lexer.zig");
 const bear_io = @import("io.zig");
 
 const TaskState = enum { running, done };

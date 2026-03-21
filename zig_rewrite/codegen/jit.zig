@@ -6,7 +6,7 @@
 //!  - X19..X28 - VM registers (callee-saved; we save them in the prologue)
 
 const std = @import("std");
-const lexer = @import("lexer.zig");
+const lexer = @import("../ast/lexer.zig");
 
 extern fn mmap(addr: ?*anyopaque, len: usize, prot: c_int, flags: c_int, fd: c_int, offset: i64) ?*anyopaque;
 extern fn munmap(addr: *anyopaque, len: usize) c_int;
