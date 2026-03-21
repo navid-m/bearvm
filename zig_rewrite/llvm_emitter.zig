@@ -315,6 +315,44 @@ const Emitter = struct {
                 try self.ptr_tmps.put(self.alloc, t, {});
                 return .{ .tmp = t };
             },
+            .alloc_array_struct => |aa| {
+                const struct_fields = blk: {
+                    var it = self.structs.iterator();
+                    while (it.next()) |entry| {
+                        if (std.mem.eql(u8, entry.key_ptr.*, aa.type_name)) {
+                            break :blk entry.value_ptr.*;
+                        }
+                    }
+                    return error.UnknownType;
+                };
+                const elem_size = struct_fields.len * 8;
+                const count_slot = try self.emitExpr(aa.count, env);
+
+                const size_tmp = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(size_tmp);
+                var buf: [32]u8 = undefined;
+                try self.out.appendSlice(self.alloc, " = mul i64 ");
+                try self.writeSlot(count_slot);
+                const elem_str = std.fmt.bufPrint(&buf, ", {d}\n", .{elem_size}) catch unreachable;
+                try self.out.appendSlice(self.alloc, elem_str);
+
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                try self.out.appendSlice(self.alloc, " = alloca i8, i64 ");
+                try self.writeTmp(size_tmp);
+                try self.out.appendSlice(self.alloc, ", align 8\n");
+
+                try self.out.appendSlice(self.alloc, "  call void @llvm.memset.p0.i64(ptr ");
+                try self.writeTmp(t);
+                try self.out.appendSlice(self.alloc, ", i8 0, i64 ");
+                try self.writeTmp(size_tmp);
+                try self.out.appendSlice(self.alloc, ", i1 false)\n");
+
+                try self.ptr_tmps.put(self.alloc, t, {});
+                return .{ .tmp = t };
+            },
             .load => |ptr_reg| {
                 const ptr = env[ptr_reg];
                 const t = self.fresh();

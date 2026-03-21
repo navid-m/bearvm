@@ -268,7 +268,7 @@ const Emitter = struct {
                 try self.ptr_tmps.put(self.alloc, t, {});
                 return .{ .tmp = t };
             },
-            .alloc_type, .alloc_array, .load, .get_field_ref, .get_index_ref => return error.UnsupportedExpr,
+            .alloc_type, .alloc_array, .load, .get_field_ref, .alloc_array_struct, .get_index_ref => return error.UnsupportedExpr,
             .float_lit => |f| {
                 const t = self.fresh();
                 try self.out.appendSlice(self.alloc, "  ");

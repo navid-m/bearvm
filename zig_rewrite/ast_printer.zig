@@ -177,6 +177,14 @@ const Printer = struct {
                 defer alloc.free(cp);
                 try self.printExpr(alloc, aa.count, cp, true, depth + 1);
             },
+            .alloc_array_struct => |aa| {
+                const label = try std.fmt.allocPrint(alloc, "alloc_array_struct({s})", .{aa.type_name});
+                defer alloc.free(label);
+                self.node(prefix, is_last, depth, label);
+                const cp = try childPrefix(alloc, prefix, is_last);
+                defer alloc.free(cp);
+                try self.printExpr(alloc, aa.count, cp, true, depth + 1);
+            },
             .load => |reg| {
                 var buf: [32]u8 = undefined;
                 const s = try std.fmt.bufPrint(&buf, "load(%{d})", .{reg});

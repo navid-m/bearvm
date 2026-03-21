@@ -218,6 +218,7 @@ pub const Op = enum(u8) {
     alloc_bytes,
     alloc_type,
     alloc_array,
+    alloc_array_struct,
     load_ref,
     store_ref,
     get_field_ref,
@@ -479,6 +480,12 @@ const Compiler = struct {
                 _ = try self.emit(.{ .op = .alloc_array, .flag = @intFromEnum(aa.elem_ty), .dst = scratch, .a = ra, .b = 0 });
                 return scratch;
             },
+            .alloc_array_struct => |aa| {
+                const name_idx = try self.strIdx(aa.type_name);
+                const ra = try self.compileExpr(aa.count, scratch);
+                _ = try self.emit(.{ .op = .alloc_array_struct, .flag = 0, .dst = scratch, .a = ra, .b = name_idx });
+                return scratch;
+            },
             .load => |ptr_reg| {
                 _ = try self.emit(.{ .op = .load_ref, .flag = 0, .dst = scratch, .a = ptr_reg, .b = 0 });
                 return scratch;
@@ -725,6 +732,7 @@ const Compiler = struct {
                 .call_builtin_void,
                 .load_float,
                 .cast,
+                .alloc_array_struct,
                 => {
                     pure_int = false;
                     break;
@@ -1299,6 +1307,35 @@ pub const Vm = struct {
                         .str => .{ .str = "" },
                         else => .void_,
                     } };
+                    try self.heap_arrays.append(self.alloc, ha);
+                    env[ins.dst] = .{ .ref = &ha.cells[0] };
+                    pc += 1;
+                },
+                .alloc_array_struct => {
+                    const count: usize = @intCast(env[ins.a].int);
+                    const type_name = str_pool[ins.b];
+                    const struct_def = blk: {
+                        for (self.program.structs.items) |*sd|
+                            if (std.mem.eql(u8, sd.name, type_name)) break :blk sd;
+                        return error.UnknownType;
+                    };
+                    const ha = try self.alloc.create(HeapArray);
+                    ha.* = .{ .cells = try self.alloc.alloc(HeapCell, count), .alloc = self.alloc };
+                    for (ha.cells) |*cell| {
+                        const hs = try self.alloc.create(HeapStruct);
+                        hs.* = .{ .name = struct_def.name, .fields = std.StringArrayHashMap(HeapCell).init(self.alloc) };
+                        for (struct_def.fields.items) |f| {
+                            const zero: Value = switch (f.ty) {
+                                .int => .{ .int = 0 },
+                                .bool_ => .{ .bool_ = false },
+                                .str => .{ .str = "" },
+                                else => .void_,
+                            };
+                            try hs.fields.put(f.name, .{ .value = zero });
+                        }
+                        try self.heap_structs.append(self.alloc, hs);
+                        cell.* = .{ .value = .{ .int = @as(i64, @bitCast(@intFromPtr(hs))) } };
+                    }
                     try self.heap_arrays.append(self.alloc, ha);
                     env[ins.dst] = .{ .ref = &ha.cells[0] };
                     pc += 1;

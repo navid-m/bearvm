@@ -232,6 +232,13 @@ const Parser = struct {
             },
             .kw_alloc_array => blk: {
                 _ = self.advance();
+                if (std.meta.activeTag(self.peek()) == .ident) {
+                    const type_name = self.peek().ident;
+                    _ = self.advance();
+                    _ = try self.expectTag(.comma);
+                    const count = try self.parseExpr(rm);
+                    break :blk try self.box(.{ .alloc_array_struct = .{ .type_name = type_name, .count = count } });
+                }
                 const elem_ty = try self.parseTy();
                 _ = try self.expectTag(.comma);
                 const count = try self.parseExpr(rm);

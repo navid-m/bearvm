@@ -388,6 +388,7 @@ pub const Expr = union(enum) {
     alloc: *Expr,
     alloc_type: []const u8,
     alloc_array: struct { elem_ty: Ty, count: *Expr },
+    alloc_array_struct: struct { type_name: []const u8, count: *Expr },
     load: RegIdx,
     get_field_ref: struct { ptr: RegIdx, field: []const u8 },
     get_index_ref: struct { arr: RegIdx, idx: *Expr },
