@@ -1,4 +1,6 @@
 //! Bear VM - Zig rewrite (Zig 0.15.2)
+//!
+//! Navid Momtahen (C) - GPL-3.0-only
 
 const std = @import("std");
 const bear_lexer = @import("./ast/lexer.zig");
