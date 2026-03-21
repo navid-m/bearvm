@@ -5,11 +5,8 @@ struct Point {
 
 @main(): int {
 entry:
-    %n = const 1000000                  ; or whatever n you want to test
-
+    %n = const 1000000
     %arr = alloc_array Point, %n
-
-    ; ──────────────── Fill phase ────────────────
     %i_fill = const 0
 
 fill_cond:
@@ -31,8 +28,6 @@ fill_body:
     jmp fill_cond
 
 fill_done:
-
-    ; ──────────────── Transform phase ────────────────
     %i_trans = const 0
 
 trans_cond:
@@ -56,8 +51,6 @@ trans_body:
     jmp trans_cond
 
 trans_done:
-
-    ; ──────────────── Sum phase ────────────────
     %sum = const 0
     %i_sum = const 0
 
