@@ -28,7 +28,7 @@ loop_end:
 entry:
     %n = const 10
     %result = call fib(%n)
-    call puts(%result)
+    call putf(%result)
     call flush()
     ret 0
 }
