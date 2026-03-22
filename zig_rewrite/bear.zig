@@ -27,6 +27,7 @@ const bear_jit = if (is_silicon) @import("./codegen/jit.zig") else struct {
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+
     defer arena.deinit();
     const alloc = arena.allocator();
     const argv = try std.process.argsAlloc(alloc);
