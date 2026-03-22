@@ -3,6 +3,7 @@
 //! Navid Momtahen (C) - GPL-3.0-only
 
 const std = @import("std");
+const builtin = @import("builtin");
 const bear_lexer = @import("./ast/lexer.zig");
 const bear_parser = @import("./ast/parser.zig");
 const bear_ast = @import("./ast/ast_printer.zig");
@@ -176,12 +177,24 @@ const bear_runtime_c =
 ;
 
 fn writeRuntime(alloc: std.mem.Allocator) []const u8 {
-    const rt_path = "/tmp/bear_runtime.c";
-    std.fs.cwd().writeFile(.{ .sub_path = rt_path, .data = bear_runtime_c }) catch |e| {
+    const tmp = getTempDir(alloc) catch |e| {
+        std.debug.print("Failed to get temporary directory: {}\n", .{e});
+        std.process.exit(1);
+    };
+    defer alloc.free(tmp);
+
+    const rt_path = std.fmt.allocPrint(alloc, "{s}/bear_runtime.c", .{tmp}) catch |e| {
+        std.debug.print("Failed to write to buffer during runtime attachment: {}\n", .{e});
+        std.process.exit(1);
+    };
+    std.fs.cwd().writeFile(.{
+        .sub_path = rt_path,
+        .data = bear_runtime_c,
+    }) catch |e| {
         std.debug.print("Failed to write runtime: {}\n", .{e});
         std.process.exit(1);
     };
-    _ = alloc;
+
     return rt_path;
 }
 
@@ -197,11 +210,24 @@ fn runQbe(program: *const bear_lexer.Program, path: []const u8, compile: bool, a
     }
 
     const stem = std.fs.path.stem(path);
-    const ir_path = std.fmt.allocPrint(alloc, "/tmp/{s}.ssa", .{stem}) catch unreachable;
-    const asm_path = std.fmt.allocPrint(alloc, "/tmp/{s}.s", .{stem}) catch unreachable;
-    const out_path = std.fmt.allocPrint(alloc, "./{s}", .{stem}) catch unreachable;
+    const temp_dir = getTempDir(alloc) catch |e| {
+        std.debug.print("Failed to get temporary directory: {}\n", .{e});
+        std.process.exit(1);
+    };
+    const ir_path = std.fmt.allocPrint(alloc, "{s}/{s}.ssa", .{ temp_dir, stem }) catch unreachable;
+    const asm_path = std.fmt.allocPrint(alloc, "{s}/{s}.s", .{ temp_dir, stem }) catch unreachable;
+
+    var extension: []const u8 = "";
+    if (builtin.os.tag == .windows) {
+        extension = ".exe";
+    }
+    const out_path = std.fmt.allocPrint(alloc, "./{s}{s}", .{ stem, extension }) catch unreachable;
 
     std.fs.cwd().writeFile(.{ .sub_path = ir_path, .data = ir }) catch |e| {
+        if (e == error.FileNotFound) {
+            std.debug.print("Failed to write IR: No such path \"{s}\"\n", .{ir_path});
+            std.process.exit(1);
+        }
         std.debug.print("Failed to write IR: {}\n", .{e});
         std.process.exit(1);
     };
@@ -224,10 +250,23 @@ fn runLlvm(program: *const bear_lexer.Program, path: []const u8, compile: bool, 
     }
 
     const stem = std.fs.path.stem(path);
-    const ir_path = std.fmt.allocPrint(alloc, "/tmp/{s}.ll", .{stem}) catch unreachable;
-    const out_path = std.fmt.allocPrint(alloc, "./{s}", .{stem}) catch unreachable;
+    const temp_dir = getTempDir(alloc) catch |e| {
+        std.debug.print("Failed to get temporary directory: {}\n", .{e});
+        std.process.exit(1);
+    };
+
+    const ir_path = std.fmt.allocPrint(alloc, "{s}/{s}.ll", .{ temp_dir, stem }) catch unreachable;
+    var extension: []const u8 = "";
+    if (builtin.os.tag == .windows) {
+        extension = ".exe";
+    }
+    const out_path = std.fmt.allocPrint(alloc, "./{s}{s}", .{ stem, extension }) catch unreachable;
 
     std.fs.cwd().writeFile(.{ .sub_path = ir_path, .data = ir }) catch |e| {
+        if (e == error.FileNotFound) {
+            std.debug.print("Failed to write IR: No such path \"{s}\"\n", .{ir_path});
+            std.process.exit(1);
+        }
         std.debug.print("Failed to write IR: {}\n", .{e});
         std.process.exit(1);
     };
@@ -235,6 +274,14 @@ fn runLlvm(program: *const bear_lexer.Program, path: []const u8, compile: bool, 
     const rt_path = writeRuntime(alloc);
     runCmd(alloc, &.{ "clang", ir_path, rt_path, "-o", out_path, "-Wno-override-module" }, "clang");
     std.debug.print("Compiled to {s}\n", .{out_path});
+}
+
+fn getTempDir(allocator: std.mem.Allocator) ![]u8 {
+    const env = std.process;
+    if (env.getEnvVarOwned(allocator, "TMPDIR")) |p| return p else |_| {}
+    if (env.getEnvVarOwned(allocator, "TMP")) |p| return p else |_| {}
+    if (env.getEnvVarOwned(allocator, "TEMP")) |p| return p else |_| {}
+    return allocator.dupe(u8, "/tmp");
 }
 
 fn runCmd(alloc: std.mem.Allocator, argv: []const []const u8, name: []const u8) void {
