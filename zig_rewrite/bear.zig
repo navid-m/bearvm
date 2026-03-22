@@ -11,9 +11,9 @@ const bear_vm = @import("./vm/vm.zig");
 const bear_qbe = @import("./codegen/qbe_emitter.zig");
 const bear_llvm = @import("./codegen/llvm_emitter.zig");
 
-const is_apple_silicon = @import("builtin").target.cpu.arch.isAARCH64();
+const is_silicon = builtin.target.cpu.arch.isAARCH64() and builtin.target.os.tag.isDarwin();
 
-const bear_jit = if (is_apple_silicon) @import("./codegen/jit.zig") else struct {
+const bear_jit = if (is_silicon) @import("./codegen/jit.zig") else struct {
     pub fn run(program: *const bear_lexer.Program, alloc: std.mem.Allocator) !void {
         _ = program;
         _ = alloc;
