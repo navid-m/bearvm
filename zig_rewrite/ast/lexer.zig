@@ -345,6 +345,7 @@ pub const Program = struct {
         freeTokens(self.tokens, alloc);
     }
 };
+
 pub const Stmt = union(enum) {
     assign: struct { reg: RegIdx, expr: *Expr },
     set_field: struct { reg: RegIdx, field: []const u8, expr: *Expr },
