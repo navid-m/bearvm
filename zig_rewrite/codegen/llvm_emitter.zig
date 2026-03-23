@@ -27,6 +27,7 @@ const Emitter = struct {
     float_tmps: std.AutoHashMapUnmanaged(TmpId, void),
     cur_ret_ty: lexer.Ty,
     func_ret_tys: std.StringHashMapUnmanaged(lexer.Ty),
+    reg_allocas: std.AutoHashMapUnmanaged(lexer.RegIdx, TmpId),
 
     fn init(alloc: std.mem.Allocator) Emitter {
         return .{
@@ -41,6 +42,7 @@ const Emitter = struct {
             .float_tmps = .empty,
             .cur_ret_ty = .void_,
             .func_ret_tys = .empty,
+            .reg_allocas = .empty,
         };
     }
 
@@ -50,6 +52,7 @@ const Emitter = struct {
         self.ptr_tmps.deinit(self.alloc);
         self.float_tmps.deinit(self.alloc);
         self.func_ret_tys.deinit(self.alloc);
+        self.reg_allocas.deinit(self.alloc);
         self.out.deinit(self.alloc);
     }
 
@@ -130,7 +133,18 @@ const Emitter = struct {
                 try self.ptr_tmps.put(self.alloc, t, {});
                 return .{ .tmp = t };
             },
-            .reg => |r| return env[r],
+            .reg => |r| {
+                if (self.reg_allocas.get(r)) |alloca_tmp| {
+                    const t = self.fresh();
+                    try self.out.appendSlice(self.alloc, "  ");
+                    try self.writeTmp(t);
+                    try self.out.appendSlice(self.alloc, " = load i64, ptr ");
+                    try self.writeTmp(alloca_tmp);
+                    try self.out.append(self.alloc, '\n');
+                    return .{ .tmp = t };
+                }
+                return env[r];
+            },
             .field => |f| {
                 const base = env[f.reg];
                 const idx = try self.fieldOffset(f.field);
@@ -537,7 +551,18 @@ const Emitter = struct {
 
     fn emitStmt(self: *Emitter, stmt: *const lexer.Stmt, env: []Slot, func_name: []const u8) !void {
         switch (stmt.*) {
-            .assign => |a| env[a.reg] = try self.emitExpr(a.expr, env),
+            .assign => |a| {
+                if (self.reg_allocas.get(a.reg)) |alloca_tmp| {
+                    const v = try self.emitExpr(a.expr, env);
+                    try self.out.appendSlice(self.alloc, "  store i64 ");
+                    try self.writeSlot(v);
+                    try self.out.appendSlice(self.alloc, ", ptr ");
+                    try self.writeTmp(alloca_tmp);
+                    try self.out.append(self.alloc, '\n');
+                } else {
+                    env[a.reg] = try self.emitExpr(a.expr, env);
+                }
+            },
             .set_field => |sf| {
                 const base = env[sf.reg];
                 const idx = try self.fieldOffset(sf.field);
@@ -745,6 +770,28 @@ const Emitter = struct {
         defer self.alloc.free(env);
         @memset(env, .undef);
         for (func.params.items) |p| env[p.idx] = .{ .param = p.name };
+
+        self.reg_allocas.clearRetainingCapacity();
+        {
+            var seen = std.AutoHashMapUnmanaged(lexer.RegIdx, void){};
+            defer seen.deinit(self.alloc);
+            for (func.body.items) |*s| {
+                if (s.* == .assign) {
+                    const reg = s.assign.reg;
+                    if (seen.contains(reg)) {
+                        if (!self.reg_allocas.contains(reg)) {
+                            const alloca_tmp = self.fresh();
+                            try self.out.appendSlice(self.alloc, "  ");
+                            try self.writeTmp(alloca_tmp);
+                            try self.out.appendSlice(self.alloc, " = alloca i64, align 8\n");
+                            try self.reg_allocas.put(self.alloc, reg, alloca_tmp);
+                        }
+                    } else {
+                        try seen.put(self.alloc, reg, {});
+                    }
+                }
+            }
+        }
 
         const body_start = self.out.items.len;
         for (func.body.items) |*s| try self.emitStmt(s, env, func.name);
