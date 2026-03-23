@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const lexer = @import("../ast/lexer.zig");
+const vm_mod = @import("../vm/vm.zig");
 
 extern fn mmap(addr: ?*anyopaque, len: usize, prot: c_int, flags: c_int, fd: c_int, offset: i64) ?*anyopaque;
 extern fn munmap(addr: *anyopaque, len: usize) c_int;
@@ -154,6 +155,7 @@ fn cmp_r(xn: u5, xm: u5) u32 {
 }
 
 /// CSET Xd, cond — set Xd=1 if cond, else 0
+///
 /// Condition codes: EQ=0, NE=1, LT(signed)=0xb, GT(signed)=0xc, LE=0xd, GE=0xa
 fn cset(xd: u5, cond: u4) u32 {
     const inv_cond: u4 = cond ^ 1;
@@ -192,6 +194,131 @@ fn bear_puts(ptr: [*]const u8, len: usize) callconv(.{ .aarch64_aapcs_darwin = .
     const stdout = std.fs.File{ .handle = 1 };
     stdout.writeAll(ptr[0..len]) catch {};
     stdout.writeAll("\n") catch {};
+}
+
+fn jit_flush() callconv(.{ .aarch64_aapcs_darwin = .{} }) void {
+    _ = std.posix.write(1, "") catch {};
+}
+
+fn jit_putf(val: i64) callconv(.{ .aarch64_aapcs_darwin = .{} }) void {
+    var tmp: [64]u8 = undefined;
+    const s = std.fmt.bufPrint(&tmp, "{d}\n", .{val}) catch return;
+    _ = std.posix.write(1, s) catch {};
+}
+
+/// Store an i64 value through a HeapCell ref pointer.
+///
+/// X0 = *HeapCell (from get_field_ref / get_index_ref), X1 = i64 value.
+fn jit_store_ref(cell: *vm_mod.HeapCell, val: i64) callconv(.{ .aarch64_aapcs_darwin = .{} }) void {
+    cell.value = .{ .int = val };
+}
+
+/// Set a named field on a HeapStruct by pointer.
+///
+/// X0 = *HeapStruct, X1 = field name ptr, X2 = field name len, X3 = i64 value.
+fn jit_set_field(hs: *vm_mod.HeapStruct, name_ptr: [*]const u8, name_len: usize, val: i64) callconv(.{ .aarch64_aapcs_darwin = .{} }) void {
+    const name = name_ptr[0..name_len];
+    if (hs.fields.getPtr(name)) |fc| {
+        fc.value = .{ .int = val };
+    }
+}
+
+/// Destroy a BearArena by pointer.
+///
+/// X0 = *BearArena.
+fn jit_arena_destroy(arena: *vm_mod.BearArena) callconv(.{ .aarch64_aapcs_darwin = .{} }) void {
+    arena.deinit();
+}
+
+/// Allocate n bytes from the page allocator, return ptr as i64.
+fn jit_alloc(n: usize) callconv(.{ .aarch64_aapcs_darwin = .{} }) i64 {
+    const buf = std.heap.page_allocator.alloc(u8, n) catch return 0;
+    @memset(buf, 0);
+    return @bitCast(@intFromPtr(buf.ptr));
+}
+
+/// Allocate a HeapStruct by type name, return *HeapStruct as i64.
+///
+/// X0 = name_ptr, X1 = name_len, X2 = *Program.
+fn jit_alloc_type(name_ptr: [*]const u8, name_len: usize, program: *const lexer.Program) callconv(.{ .aarch64_aapcs_darwin = .{} }) i64 {
+    const name = name_ptr[0..name_len];
+    const alloc = std.heap.page_allocator;
+    const struct_def = blk: {
+        for (program.structs.items) |*sd|
+            if (std.mem.eql(u8, sd.name, name)) break :blk sd;
+        return 0;
+    };
+    const hs = alloc.create(vm_mod.HeapStruct) catch return 0;
+    hs.* = .{ .name = struct_def.name, .fields = std.StringArrayHashMap(vm_mod.HeapCell).init(alloc) };
+    for (struct_def.fields.items) |f| {
+        const zero: vm_mod.Value = switch (f.ty) {
+            .int => .{ .int = 0 },
+            .bool_ => .{ .bool_ = false },
+            .str => .{ .str = "" },
+            else => .void_,
+        };
+        hs.fields.put(f.name, .{ .value = zero }) catch {};
+    }
+    return @bitCast(@intFromPtr(hs));
+}
+
+/// Load i64 value from a *HeapCell.
+fn jit_load_ref(cell: *vm_mod.HeapCell) callconv(.{ .aarch64_aapcs_darwin = .{} }) i64 {
+    return switch (cell.value) {
+        .int => |n| n,
+        .bool_ => |b| if (b) 1 else 0,
+        else => 0,
+    };
+}
+
+/// Get a *HeapCell for a named field of a HeapStruct.
+///
+/// X0 = *HeapStruct, X1 = name_ptr, X2 = name_len. Returns *HeapCell as i64.
+fn jit_get_field_ref(hs: *vm_mod.HeapStruct, name_ptr: [*]const u8, name_len: usize) callconv(.{ .aarch64_aapcs_darwin = .{} }) i64 {
+    const name = name_ptr[0..name_len];
+    const fc = hs.fields.getPtr(name) orelse return 0;
+    return @bitCast(@intFromPtr(fc));
+}
+
+/// Get a *HeapCell at index in a HeapArray.
+///
+/// X0 = *HeapCell (base of array), X1 = index. Returns *HeapCell as i64.
+fn jit_get_index_ref(base: *vm_mod.HeapCell, idx: i64) callconv(.{ .aarch64_aapcs_darwin = .{} }) i64 {
+    const cell_ptr: [*]vm_mod.HeapCell = @ptrCast(base);
+    return @bitCast(@intFromPtr(&cell_ptr[@intCast(idx)]));
+}
+
+/// Create a BearArena, return *BearArena as i64.
+fn jit_arena_create() callconv(.{ .aarch64_aapcs_darwin = .{} }) i64 {
+    const arena = std.heap.page_allocator.create(vm_mod.BearArena) catch return 0;
+    arena.* = vm_mod.BearArena.init(std.heap.page_allocator);
+    return @bitCast(@intFromPtr(arena));
+}
+
+/// Allocate n bytes from a BearArena, return ptr as i64.
+///
+/// X0 = *BearArena, X1 = n.
+fn jit_arena_alloc(arena: *vm_mod.BearArena, n: i64) callconv(.{ .aarch64_aapcs_darwin = .{} }) i64 {
+    const buf = arena.allocator().alloc(u8, @intCast(n)) catch return 0;
+    @memset(buf, 0);
+    return @bitCast(@intFromPtr(buf.ptr));
+}
+
+/// Here:
+///
+///   - X0 = *HeapStruct
+///   - X1 = name_ptr
+///   - X2 = name_len.
+///
+///  Returns i64.
+fn jit_get_field(hs: *vm_mod.HeapStruct, name_ptr: [*]const u8, name_len: usize) callconv(.{ .aarch64_aapcs_darwin = .{} }) i64 {
+    const name = name_ptr[0..name_len];
+    const fc = hs.fields.get(name) orelse return 0;
+    return switch (fc.value) {
+        .int => |n| n,
+        .bool_ => |b| if (b) 1 else 0,
+        else => 0,
+    };
 }
 
 const VM_REG_BASE: u5 = 19;
@@ -308,6 +435,69 @@ const Compiler = struct {
 
             .call => |c| try self.emitCall(c.name, c.args.items, dst),
 
+            .alloc => |size_expr| {
+                try self.evalExpr(size_expr, 0);
+                emitImm64(self.buf, SCRATCH_C, @intFromPtr(&jit_alloc));
+                self.buf.emit(blr(SCRATCH_C));
+                if (dst != 0) self.buf.emit(mov_r(dst, 0));
+            },
+
+            .alloc_type => |name| {
+                emitImm64(self.buf, 0, @intFromPtr(name.ptr));
+                emitImm64(self.buf, 1, name.len);
+                emitImm64(self.buf, 2, @intFromPtr(self.program));
+                emitImm64(self.buf, SCRATCH_C, @intFromPtr(&jit_alloc_type));
+                self.buf.emit(blr(SCRATCH_C));
+                if (dst != 0) self.buf.emit(mov_r(dst, 0));
+            },
+
+            .load => |ptr_reg| {
+                self.buf.emit(mov_r(0, vmReg(ptr_reg)));
+                emitImm64(self.buf, SCRATCH_C, @intFromPtr(&jit_load_ref));
+                self.buf.emit(blr(SCRATCH_C));
+                if (dst != 0) self.buf.emit(mov_r(dst, 0));
+            },
+
+            .get_field_ref => |gfr| {
+                self.buf.emit(mov_r(0, vmReg(gfr.ptr)));
+                emitImm64(self.buf, 1, @intFromPtr(gfr.field.ptr));
+                emitImm64(self.buf, 2, gfr.field.len);
+                emitImm64(self.buf, SCRATCH_C, @intFromPtr(&jit_get_field_ref));
+                self.buf.emit(blr(SCRATCH_C));
+                if (dst != 0) self.buf.emit(mov_r(dst, 0));
+            },
+
+            .get_index_ref => |gir| {
+                try self.evalExpr(gir.idx, 1);
+                self.buf.emit(mov_r(0, vmReg(gir.arr)));
+                emitImm64(self.buf, SCRATCH_C, @intFromPtr(&jit_get_index_ref));
+                self.buf.emit(blr(SCRATCH_C));
+                if (dst != 0) self.buf.emit(mov_r(dst, 0));
+            },
+
+            .arena_create => {
+                emitImm64(self.buf, SCRATCH_C, @intFromPtr(&jit_arena_create));
+                self.buf.emit(blr(SCRATCH_C));
+                if (dst != 0) self.buf.emit(mov_r(dst, 0));
+            },
+
+            .arena_alloc => |aa| {
+                self.buf.emit(mov_r(0, vmReg(aa.arena)));
+                try self.evalExpr(aa.size, 1);
+                emitImm64(self.buf, SCRATCH_C, @intFromPtr(&jit_arena_alloc));
+                self.buf.emit(blr(SCRATCH_C));
+                if (dst != 0) self.buf.emit(mov_r(dst, 0));
+            },
+
+            .field => |f| {
+                self.buf.emit(mov_r(0, vmReg(f.reg)));
+                emitImm64(self.buf, 1, @intFromPtr(f.field.ptr));
+                emitImm64(self.buf, 2, f.field.len);
+                emitImm64(self.buf, SCRATCH_C, @intFromPtr(&jit_get_field));
+                self.buf.emit(blr(SCRATCH_C));
+                if (dst != 0) self.buf.emit(mov_r(dst, 0));
+            },
+
             else => return error.UnsupportedExpr,
         }
     }
@@ -332,6 +522,23 @@ const Compiler = struct {
                     },
                 }
                 emitImm64(self.buf, SCRATCH_C, @intFromPtr(&bear_puts));
+                self.buf.emit(blr(SCRATCH_C));
+            }
+            if (dst != 0) self.buf.emit(movz(dst, 0, 0));
+            return;
+        }
+
+        if (std.mem.eql(u8, name, "flush")) {
+            emitImm64(self.buf, SCRATCH_C, @intFromPtr(&jit_flush));
+            self.buf.emit(blr(SCRATCH_C));
+            if (dst != 0) self.buf.emit(movz(dst, 0, 0));
+            return;
+        }
+
+        if (std.mem.eql(u8, name, "putf")) {
+            if (arg_exprs.len == 1) {
+                try self.evalExpr(arg_exprs[0], 0);
+                emitImm64(self.buf, SCRATCH_C, @intFromPtr(&jit_putf));
                 self.buf.emit(blr(SCRATCH_C));
             }
             if (dst != 0) self.buf.emit(movz(dst, 0, 0));
@@ -444,10 +651,34 @@ const Compiler = struct {
                     });
                 },
 
-                .set_field => return error.UnsupportedStmt,
-                .store => return error.UnsupportedStmt,
-                .free => return error.UnsupportedStmt,
-                .arena_destroy => return error.UnsupportedStmt,
+                .set_field => |sf| {
+                    try self.evalExpr(sf.expr, SCRATCH_B);
+                    self.buf.emit(mov_r(0, vmReg(sf.reg)));
+                    emitImm64(self.buf, 1, @intFromPtr(sf.field.ptr));
+                    emitImm64(self.buf, 2, sf.field.len);
+                    self.buf.emit(mov_r(3, SCRATCH_B));
+                    emitImm64(self.buf, SCRATCH_C, @intFromPtr(&jit_set_field));
+                    self.buf.emit(blr(SCRATCH_C));
+                },
+
+                .store => |st| {
+                    try self.evalExpr(st.expr, SCRATCH_B);
+                    self.buf.emit(mov_r(0, vmReg(st.ptr)));
+                    self.buf.emit(mov_r(1, SCRATCH_B));
+                    emitImm64(self.buf, SCRATCH_C, @intFromPtr(&jit_store_ref));
+                    self.buf.emit(blr(SCRATCH_C));
+                },
+
+                .free => |_| {
+                    // NOOP in JIT...
+                    // Because heap tracking requires the VM's allocator/table.
+                },
+
+                .arena_destroy => |reg| {
+                    self.buf.emit(mov_r(0, vmReg(reg)));
+                    emitImm64(self.buf, SCRATCH_C, @intFromPtr(&jit_arena_destroy));
+                    self.buf.emit(blr(SCRATCH_C));
+                },
             }
         }
     }
@@ -488,7 +719,10 @@ const Compiler = struct {
 
     fn applyPatches(self: *Compiler) !void {
         for (self.patches.items) |p| {
-            const target = self.labels.get(p.label) orelse return error.UndefinedLabel;
+            const target = self.labels.get(p.label) orelse {
+                if (p.kind == .b) continue;
+                return error.UndefinedLabel;
+            };
             const off: i64 = @as(i64, target) - @as(i64, p.instr_idx);
             const instr: u32 = switch (p.kind) {
                 .cbz => cbz(p.reg, @intCast(off)),
