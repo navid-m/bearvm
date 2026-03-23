@@ -269,7 +269,119 @@ const Emitter = struct {
                 try self.ptr_tmps.put(self.alloc, t, {});
                 return .{ .tmp = t };
             },
-            .alloc_type, .alloc_array, .load, .get_field_ref, .alloc_array_struct, .get_index_ref => return error.UnsupportedExpr,
+            .alloc_type => |type_name| {
+                const fields = self.structs.get(type_name) orelse return error.UnknownStruct;
+                const size = fields.len * 8;
+                const ptr = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(ptr);
+                var buf: [32]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, " =l alloc8 {d}\n", .{size}) catch unreachable;
+                try self.out.appendSlice(self.alloc, s);
+                for (0..fields.len) |i| {
+                    const fptr = self.fresh();
+                    try self.out.appendSlice(self.alloc, "  ");
+                    try self.writeTmp(fptr);
+                    const off = std.fmt.bufPrint(&buf, " =l add ", .{}) catch unreachable;
+                    try self.out.appendSlice(self.alloc, off);
+                    try self.writeTmp(ptr);
+                    const offv = std.fmt.bufPrint(&buf, ", {d}\n", .{i * 8}) catch unreachable;
+                    try self.out.appendSlice(self.alloc, offv);
+                    try self.out.appendSlice(self.alloc, "  storel 0, ");
+                    try self.writeTmp(fptr);
+                    try self.out.append(self.alloc, '\n');
+                }
+                try self.ptr_tmps.put(self.alloc, ptr, {});
+                return .{ .tmp = ptr };
+            },
+            .alloc_array => |aa| {
+                const count_slot = try self.emitExprLong(aa.count, env);
+                const size_tmp = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(size_tmp);
+                try self.out.appendSlice(self.alloc, " =l mul ");
+                try self.writeSlot(count_slot);
+                try self.out.appendSlice(self.alloc, ", 8\n");
+                const ptr = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(ptr);
+                try self.out.appendSlice(self.alloc, " =l alloc8 ");
+                try self.writeTmp(size_tmp);
+                try self.out.append(self.alloc, '\n');
+                try self.ptr_tmps.put(self.alloc, ptr, {});
+                return .{ .tmp = ptr };
+            },
+            .alloc_array_struct => |aas| {
+                const fields = self.structs.get(aas.type_name) orelse return error.UnknownStruct;
+                const field_count = fields.len;
+                const count_slot = try self.emitExprLong(aas.count, env);
+                const elem_size_tmp = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(elem_size_tmp);
+                var buf: [32]u8 = undefined;
+                const es = std.fmt.bufPrint(&buf, " =l copy {d}\n", .{field_count * 8}) catch unreachable;
+                try self.out.appendSlice(self.alloc, es);
+                const size_tmp = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(size_tmp);
+                try self.out.appendSlice(self.alloc, " =l mul ");
+                try self.writeSlot(count_slot);
+                try self.out.appendSlice(self.alloc, ", ");
+                try self.writeTmp(elem_size_tmp);
+                try self.out.append(self.alloc, '\n');
+                const ptr = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(ptr);
+                try self.out.appendSlice(self.alloc, " =l alloc8 ");
+                try self.writeTmp(size_tmp);
+                try self.out.append(self.alloc, '\n');
+                try self.ptr_tmps.put(self.alloc, ptr, {});
+                return .{ .tmp = ptr };
+            },
+            .load => |ptr_reg| {
+                const ptr_slot = env[ptr_reg];
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                try self.out.appendSlice(self.alloc, " =l loadl ");
+                try self.writeSlot(ptr_slot);
+                try self.out.append(self.alloc, '\n');
+                return .{ .tmp = t };
+            },
+            .get_field_ref => |gf| {
+                const base = env[gf.ptr];
+                const offset = try self.fieldOffset(gf.field);
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                try self.out.appendSlice(self.alloc, " =l add ");
+                try self.writeSlot(base);
+                var buf: [32]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, ", {d}\n", .{offset}) catch unreachable;
+                try self.out.appendSlice(self.alloc, s);
+                try self.ptr_tmps.put(self.alloc, t, {});
+                return .{ .tmp = t };
+            },
+            .get_index_ref => |gi| {
+                const base = env[gi.arr];
+                const idx_slot = try self.emitExprLong(gi.idx, env);
+                const off_tmp = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(off_tmp);
+                try self.out.appendSlice(self.alloc, " =l mul ");
+                try self.writeSlot(idx_slot);
+                try self.out.appendSlice(self.alloc, ", 8\n");
+                const t = self.fresh();
+                try self.out.appendSlice(self.alloc, "  ");
+                try self.writeTmp(t);
+                try self.out.appendSlice(self.alloc, " =l add ");
+                try self.writeSlot(base);
+                try self.out.appendSlice(self.alloc, ", ");
+                try self.writeTmp(off_tmp);
+                try self.out.append(self.alloc, '\n');
+                try self.ptr_tmps.put(self.alloc, t, {});
+                return .{ .tmp = t };
+            },
             .float_lit => |f| {
                 const t = self.fresh();
                 try self.out.appendSlice(self.alloc, "  ");
@@ -314,7 +426,7 @@ const Emitter = struct {
     fn isLong(self: *Emitter, a: *lexer.Expr, env: []Slot) bool {
         return switch (a.*) {
             .str => true,
-            .alloc, .struct_lit, .arena_alloc, .arena_create => true,
+            .alloc, .struct_lit, .arena_alloc, .arena_create, .alloc_type, .alloc_array, .alloc_array_struct, .get_field_ref, .get_index_ref, .load => true,
             .reg => |r| switch (env[r]) {
                 .param => true,
                 .tmp => |id| self.ptr_tmps.contains(id),
@@ -445,7 +557,15 @@ const Emitter = struct {
                 try self.out.appendSlice(self.alloc, br.false_label);
                 try self.out.append(self.alloc, '\n');
             },
-            .store => return error.UnsupportedStmt,
+            .store => |st| {
+                const ptr_slot = env[st.ptr];
+                const val = try self.emitExpr(st.expr, env);
+                try self.out.appendSlice(self.alloc, "  storel ");
+                try self.writeSlot(val);
+                try self.out.appendSlice(self.alloc, ", ");
+                try self.writeSlot(ptr_slot);
+                try self.out.append(self.alloc, '\n');
+            },
             .free => |ptr_reg| {
                 try self.out.appendSlice(self.alloc, "  call $free(l ");
                 try self.writeSlot(env[ptr_reg]);
