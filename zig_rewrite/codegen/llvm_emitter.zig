@@ -1,4 +1,5 @@
 //! Emit LLVM IR (textual .ll) from a Bear program.
+//!
 //! LLVM IR reference: https://llvm.org/docs/LangRef.html
 
 const std = @import("std");

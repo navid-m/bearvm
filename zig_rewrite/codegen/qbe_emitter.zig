@@ -1,4 +1,5 @@
 //! Emit QBE IL from a Bear program.
+//!
 //! QBE IL reference: https://c9x.me/compile/doc/il.html
 
 const std = @import("std");
