@@ -98,6 +98,16 @@ const Emitter = struct {
         return error.UnknownField;
     }
 
+    fn fieldTy(self: *Emitter, field: []const u8) !lexer.Ty {
+        var it = self.structs.iterator();
+        while (it.next()) |entry| {
+            for (entry.value_ptr.*) |f| {
+                if (std.mem.eql(u8, f.name, field)) return f.ty;
+            }
+        }
+        return error.UnknownField;
+    }
+
     fn emitExprLong(self: *Emitter, expr: *lexer.Expr, env: []Slot) anyerror!Slot {
         switch (expr.*) {
             .int => |n| {
@@ -139,6 +149,7 @@ const Emitter = struct {
             .field => |f| {
                 const base = env[f.reg];
                 const offset = try self.fieldOffset(f.field);
+                const ty = try self.fieldTy(f.field);
                 const ptr = self.fresh();
                 try self.out.appendSlice(self.alloc, "  ");
                 try self.writeTmp(ptr);
@@ -150,7 +161,13 @@ const Emitter = struct {
                 const val = self.fresh();
                 try self.out.appendSlice(self.alloc, "  ");
                 try self.writeTmp(val);
-                try self.out.appendSlice(self.alloc, " =l loadl ");
+                const qty = qbeTy(ty);
+                if (qty == 'l') {
+                    try self.out.appendSlice(self.alloc, " =l loadl ");
+                    try self.ptr_tmps.put(self.alloc, val, {});
+                } else {
+                    try self.out.appendSlice(self.alloc, " =w loadw ");
+                }
                 try self.writeTmp(ptr);
                 try self.out.append(self.alloc, '\n');
                 return .{ .tmp = val };
@@ -213,7 +230,8 @@ const Emitter = struct {
                     try self.writeTmp(ptr);
                     const off = std.fmt.bufPrint(&buf, ", {d}\n", .{i * 8}) catch unreachable;
                     try self.out.appendSlice(self.alloc, off);
-                    try self.out.appendSlice(self.alloc, "  storel ");
+                    const store_op = if (qbeTy(fd.ty) == 'l') "  storel " else "  storew ";
+                    try self.out.appendSlice(self.alloc, store_op);
                     try self.writeSlot(v);
                     try self.out.appendSlice(self.alloc, ", ");
                     try self.writeTmp(fptr);
@@ -427,6 +445,10 @@ const Emitter = struct {
         return switch (a.*) {
             .str => true,
             .alloc, .struct_lit, .arena_alloc, .arena_create, .alloc_type, .alloc_array, .alloc_array_struct, .get_field_ref, .get_index_ref, .load => true,
+            .field => |f| blk: {
+                const ty = self.fieldTy(f.field) catch break :blk false;
+                break :blk qbeTy(ty) == 'l';
+            },
             .reg => |r| switch (env[r]) {
                 .param => true,
                 .tmp => |id| self.ptr_tmps.contains(id),
@@ -436,13 +458,21 @@ const Emitter = struct {
         };
     }
 
+    fn slotIsLong(self: *Emitter, slot: Slot, a: *lexer.Expr, env: []Slot) bool {
+        return switch (slot) {
+            .tmp => |id| self.ptr_tmps.contains(id) or self.isLong(a, env),
+            .param => true,
+            .undef => false,
+        };
+    }
+
     fn emitCallExpr(self: *Emitter, name: []const u8, arg_exprs: []*lexer.Expr, env: []Slot) !Slot {
         var slots_buf: [16]Slot = undefined;
         var long_buf: [16]bool = undefined;
         const argc = arg_exprs.len;
         for (arg_exprs, 0..) |a, i| {
             slots_buf[i] = try self.emitExpr(a, env);
-            long_buf[i] = self.isLong(a, env);
+            long_buf[i] = self.slotIsLong(slots_buf[i], a, env);
         }
         const is_long_ret = std.mem.eql(u8, name, "open") or
             std.mem.eql(u8, name, "read") or
@@ -468,7 +498,7 @@ const Emitter = struct {
         const argc = arg_exprs.len;
         for (arg_exprs, 0..) |a, i| {
             slots_buf[i] = try self.emitExpr(a, env);
-            long_buf[i] = self.isLong(a, env);
+            long_buf[i] = self.slotIsLong(slots_buf[i], a, env);
         }
         try self.out.appendSlice(self.alloc, "  call $");
         try self.out.appendSlice(self.alloc, name);
@@ -498,6 +528,7 @@ const Emitter = struct {
             .set_field => |sf| {
                 const base = env[sf.reg];
                 const offset = try self.fieldOffset(sf.field);
+                const ty = try self.fieldTy(sf.field);
                 const v = try self.emitExpr(sf.expr, env);
                 const fptr = self.fresh();
                 try self.out.appendSlice(self.alloc, "  ");
@@ -507,7 +538,8 @@ const Emitter = struct {
                 var buf: [24]u8 = undefined;
                 const s = std.fmt.bufPrint(&buf, ", {d}\n", .{offset}) catch unreachable;
                 try self.out.appendSlice(self.alloc, s);
-                try self.out.appendSlice(self.alloc, "  storel ");
+                const store_op = if (qbeTy(ty) == 'l') "  storel " else "  storew ";
+                try self.out.appendSlice(self.alloc, store_op);
                 try self.writeSlot(v);
                 try self.out.appendSlice(self.alloc, ", ");
                 try self.writeTmp(fptr);
