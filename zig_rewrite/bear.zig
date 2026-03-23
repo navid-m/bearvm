@@ -1148,3 +1148,71 @@ test "qbe: simple.bear emits without error" {
     try std.testing.expect(std.mem.indexOf(u8, ir, "call $flush()") != null);
     try std.testing.expect(std.mem.indexOf(u8, ir, "call $puts(l ") != null);
 }
+
+test "qbe: struct int field uses storew not storel" {
+    const alloc = std.testing.allocator;
+    const ir = try qbeEmit(
+        \\struct Person {
+        \\  name: string
+        \\  age: int
+        \\}
+        \\@main(): int {
+        \\  %p = Person { name: "Alice" age: 25 }
+        \\  ret 0
+        \\}
+    , alloc);
+    defer alloc.free(ir);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "storew") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "storel") != null);
+}
+
+test "qbe: struct int field uses loadw not loadl" {
+    const alloc = std.testing.allocator;
+    const ir = try qbeEmit(
+        \\struct Person {
+        \\  name: string
+        \\  age: int
+        \\}
+        \\@main(): int {
+        \\  %p = Person { name: "Alice" age: 25 }
+        \\  %a = %p.age
+        \\  ret %a
+        \\}
+    , alloc);
+    defer alloc.free(ir);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "=w loadw") != null);
+}
+
+test "qbe: struct string field passed to call uses l type" {
+    const alloc = std.testing.allocator;
+    const ir = try qbeEmit(
+        \\struct Person {
+        \\  name: string
+        \\  age: int
+        \\}
+        \\@main(): int {
+        \\  %p = Person { name: "Alice" age: 25 }
+        \\  call puts(%p.name)
+        \\  ret 0
+        \\}
+    , alloc);
+    defer alloc.free(ir);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "call $puts(l ") != null);
+}
+
+test "qbe: set_field on int field uses storew" {
+    const alloc = std.testing.allocator;
+    const ir = try qbeEmit(
+        \\struct Person {
+        \\  name: string
+        \\  age: int
+        \\}
+        \\@main(): int {
+        \\  %p = Person { name: "Alice" age: 25 }
+        \\  set %p.age = add %p.age, 1
+        \\  ret 0
+        \\}
+    , alloc);
+    defer alloc.free(ir);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "storew") != null);
+}
