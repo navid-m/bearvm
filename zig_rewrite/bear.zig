@@ -172,8 +172,36 @@ fn loadProgram(path: []const u8, alloc: std.mem.Allocator) bear_lexer.Program {
 const bear_runtime_c =
     \\#include <stdio.h>
     \\#include <stdint.h>
+    \\#include <stdlib.h>
+    \\#include <string.h>
     \\void putf(int64_t n) { printf("%lld\n", (long long)n); }
     \\void flush(void) { fflush(stdout); }
+    \\typedef struct BearArenaBlock { void *ptr; struct BearArenaBlock *next; } BearArenaBlock;
+    \\typedef struct { BearArenaBlock *head; } BearArena;
+    \\void *bear_arena_create(void) {
+    \\    BearArena *a = malloc(sizeof(BearArena));
+    \\    a->head = NULL;
+    \\    return a;
+    \\}
+    \\void *bear_arena_alloc(void *arena, int64_t size) {
+    \\    BearArena *a = (BearArena *)arena;
+    \\    BearArenaBlock *blk = malloc(sizeof(BearArenaBlock));
+    \\    blk->ptr = malloc((size_t)size);
+    \\    blk->next = a->head;
+    \\    a->head = blk;
+    \\    return blk->ptr;
+    \\}
+    \\void bear_arena_destroy(void *arena) {
+    \\    BearArena *a = (BearArena *)arena;
+    \\    BearArenaBlock *blk = a->head;
+    \\    while (blk) {
+    \\        BearArenaBlock *next = blk->next;
+    \\        free(blk->ptr);
+    \\        free(blk);
+    \\        blk = next;
+    \\    }
+    \\    free(a);
+    \\}
     \\
 ;
 

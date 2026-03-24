@@ -260,13 +260,10 @@ const Emitter = struct {
                 return .{ .tmp = t };
             },
             .free => |ptr_reg| {
-                const t = self.fresh();
-                try self.out.appendSlice(self.alloc, "  ");
-                try self.writeTmp(t);
-                try self.out.appendSlice(self.alloc, " = call i32 @free(ptr ");
+                try self.out.appendSlice(self.alloc, "  call void @free(ptr ");
                 try self.writeSlot(env[ptr_reg]);
                 try self.out.appendSlice(self.alloc, ")\n");
-                return .{ .tmp = t };
+                return .undef;
             },
             .arena_create => {
                 const t = self.fresh();
@@ -522,16 +519,42 @@ const Emitter = struct {
             slots_buf[i] = try self.emitExpr(a, env);
             is_ptr_buf[i] = self.isPtr(a, env);
         }
+
         const callee_ret = self.func_ret_tys.get(name);
         const is_float_ret = callee_ret != null and (callee_ret.? == .float_ or callee_ret.? == .double_);
-        const ret_ty: []const u8 = if (std.mem.eql(u8, name, "puts")) "i32" else if (is_float_ret) "double" else "i64";
+        const is_puts = std.mem.eql(u8, name, "puts");
+        const puts_with_int = is_puts and argc == 1 and !is_ptr_buf[0] and !self.slotIsFloat(slots_buf[0]);
+        const effective_name = if (puts_with_int) "putf" else name;
+
+        const is_void_builtin = std.mem.eql(u8, effective_name, "putf") or
+            std.mem.eql(u8, effective_name, "flush") or
+            std.mem.eql(u8, effective_name, "free") or
+            std.mem.eql(u8, effective_name, "bear_arena_destroy") or
+            (callee_ret != null and callee_ret.? == .void_);
+        if (is_void_builtin) {
+            try self.out.appendSlice(self.alloc, "  call void @");
+            try self.out.appendSlice(self.alloc, effective_name);
+            try self.out.append(self.alloc, '(');
+            for (0..argc) |i| {
+                if (i > 0) try self.out.appendSlice(self.alloc, ", ");
+                const slot = slots_buf[i];
+                const arg_ty: []const u8 = if (is_ptr_buf[i]) "ptr" else if (self.slotIsFloat(slot)) "double" else "i64";
+                try self.out.appendSlice(self.alloc, arg_ty);
+                try self.out.append(self.alloc, ' ');
+                try self.writeSlot(slot);
+            }
+            try self.out.appendSlice(self.alloc, ")\n");
+            return .undef;
+        }
+
+        const ret_ty: []const u8 = if (is_puts and !puts_with_int) "i32" else if (is_float_ret) "double" else "i64";
         const t = self.fresh();
         try self.out.appendSlice(self.alloc, "  ");
         try self.writeTmp(t);
         try self.out.appendSlice(self.alloc, " = call ");
         try self.out.appendSlice(self.alloc, ret_ty);
         try self.out.appendSlice(self.alloc, " @");
-        try self.out.appendSlice(self.alloc, name);
+        try self.out.appendSlice(self.alloc, effective_name);
         try self.out.append(self.alloc, '(');
         for (0..argc) |i| {
             if (i > 0) try self.out.appendSlice(self.alloc, ", ");
@@ -586,10 +609,14 @@ const Emitter = struct {
             .call => |c| try self.emitCallStmt(c.name, c.args.items, env),
             .ret => |e| {
                 const v = try self.emitExpr(e, env);
-                const is_float = self.slotIsFloat(v);
-                try self.out.appendSlice(self.alloc, if (is_float) "  ret double " else "  ret i64 ");
-                try self.writeSlot(v);
-                try self.out.append(self.alloc, '\n');
+                if (self.cur_ret_ty == .void_) {
+                    try self.out.appendSlice(self.alloc, "  ret void\n");
+                } else {
+                    const is_float = self.slotIsFloat(v);
+                    try self.out.appendSlice(self.alloc, if (is_float) "  ret double " else "  ret i64 ");
+                    try self.writeSlot(v);
+                    try self.out.append(self.alloc, '\n');
+                }
             },
             .ret_void => {
                 try self.out.appendSlice(self.alloc, "  ret void\n");
