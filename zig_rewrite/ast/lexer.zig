@@ -430,6 +430,7 @@ pub const ExprSlab = struct {
         }
         alloc.free(self.buf);
     }
+
     pub fn alloc_node(self: *ExprSlab, e: Expr) error{OutOfMemory}!*Expr {
         if (self.used >= self.buf.len) return error.OutOfMemory;
         const p = &self.buf[self.used];
