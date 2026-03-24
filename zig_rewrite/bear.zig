@@ -174,8 +174,17 @@ const bear_runtime_c =
     \\#include <stdint.h>
     \\#include <stdlib.h>
     \\#include <string.h>
+    \\#include <unistd.h>
+    \\#include <fcntl.h>
     \\void putf(int64_t n) { printf("%lld\n", (long long)n); }
     \\void flush(void) { fflush(stdout); }
+    \\int64_t bear_open(const char *path, int64_t mode) {
+    \\    if (mode == 1) return (int64_t)open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    \\    return (int64_t)open(path, O_RDONLY);
+    \\}
+    \\int64_t bear_read(int64_t fd, void *buf, int64_t n) { return (int64_t)read((int)fd, buf, (size_t)n); }
+    \\int64_t bear_write(int64_t fd, const void *buf, int64_t n) { return (int64_t)write((int)fd, buf, (size_t)n); }
+    \\int64_t bear_close(int64_t fd) { return (int64_t)close((int)fd); }
     \\typedef struct BearArenaBlock { void *ptr; struct BearArenaBlock *next; } BearArenaBlock;
     \\typedef struct { BearArenaBlock *head; } BearArena;
     \\void *bear_arena_create(void) {

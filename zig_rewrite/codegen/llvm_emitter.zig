@@ -524,7 +524,7 @@ const Emitter = struct {
         const is_float_ret = callee_ret != null and (callee_ret.? == .float_ or callee_ret.? == .double_);
         const is_puts = std.mem.eql(u8, name, "puts");
         const puts_with_int = is_puts and argc == 1 and !is_ptr_buf[0] and !self.slotIsFloat(slots_buf[0]);
-        const effective_name = if (puts_with_int) "putf" else name;
+        const effective_name = if (puts_with_int) "putf" else if (std.mem.eql(u8, name, "open")) "bear_open" else if (std.mem.eql(u8, name, "read")) "bear_read" else if (std.mem.eql(u8, name, "write")) "bear_write" else if (std.mem.eql(u8, name, "close")) "bear_close" else name;
 
         const is_void_builtin = std.mem.eql(u8, effective_name, "putf") or
             std.mem.eql(u8, effective_name, "flush") or
@@ -847,10 +847,10 @@ const Emitter = struct {
             \\declare i32 @puts(ptr)
             \\declare void @putf(i64)
             \\declare void @flush()
-            \\declare i64 @open(ptr, i64)
-            \\declare i64 @read(i64, ptr, i64)
-            \\declare i64 @write(i64, ptr, i64)
-            \\declare i64 @close(i64)
+            \\declare i64 @bear_open(ptr, i64)
+            \\declare i64 @bear_read(i64, ptr, i64)
+            \\declare i64 @bear_write(i64, ptr, i64)
+            \\declare i64 @bear_close(i64)
             \\declare void @free(ptr)
             \\declare ptr @bear_arena_create()
             \\declare ptr @bear_arena_alloc(ptr, i64)
