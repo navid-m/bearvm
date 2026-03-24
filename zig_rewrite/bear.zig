@@ -222,7 +222,9 @@ fn runQbe(program: *const bear_lexer.Program, path: []const u8, compile: bool, a
     if (builtin.os.tag == .windows) {
         extension = ".exe";
     }
-    const out_path = std.fmt.allocPrint(alloc, "./{s}{s}", .{ stem, extension }) catch unreachable;
+
+    makeBvmOutDir();
+    const out_path = std.fmt.allocPrint(alloc, "./bvm-out/{s}{s}", .{ stem, extension }) catch unreachable;
 
     std.fs.cwd().writeFile(.{ .sub_path = ir_path, .data = ir }) catch |e| {
         if (e == error.FileNotFound) {
@@ -237,6 +239,14 @@ fn runQbe(program: *const bear_lexer.Program, path: []const u8, compile: bool, a
     const rt_path = writeRuntime(alloc);
     runCmd(alloc, &.{ "cc", asm_path, rt_path, "-o", out_path }, "cc");
     std.debug.print("Compiled to {s}\n", .{out_path});
+}
+
+fn makeBvmOutDir() void {
+    std.fs.cwd().makeDir("bvm-out") catch |e| {
+        if (e != error.PathAlreadyExists) {
+            std.debug.print("Ran into error when creating bvm-out directory: {any}", .{e});
+        }
+    };
 }
 
 fn runLlvm(program: *const bear_lexer.Program, path: []const u8, compile: bool, alloc: std.mem.Allocator) void {
@@ -261,7 +271,9 @@ fn runLlvm(program: *const bear_lexer.Program, path: []const u8, compile: bool, 
     if (builtin.os.tag == .windows) {
         extension = ".exe";
     }
-    const out_path = std.fmt.allocPrint(alloc, "./{s}{s}", .{ stem, extension }) catch unreachable;
+
+    makeBvmOutDir();
+    const out_path = std.fmt.allocPrint(alloc, "./bvm-out/{s}{s}", .{ stem, extension }) catch unreachable;
 
     std.fs.cwd().writeFile(.{ .sub_path = ir_path, .data = ir }) catch |e| {
         if (e == error.FileNotFound) {

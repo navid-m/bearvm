@@ -1,3 +1,4 @@
+bvm-out
 .zig-cache
 zig-out
 *.pdb
