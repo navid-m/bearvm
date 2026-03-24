@@ -363,7 +363,7 @@ const Emitter = struct {
                 try self.writeTmp(t);
                 try self.out.appendSlice(self.alloc, ", i8 0, i64 ");
                 try self.writeTmp(size_tmp);
-                try self.out.appendSlice(self.alloc, ", i1 false)\n");
+                try self.out.appendSlice(self.alloc, ")\n");
 
                 try self.ptr_tmps.put(self.alloc, t, {});
                 return .{ .tmp = t };
@@ -828,6 +828,7 @@ const Emitter = struct {
             \\declare ptr @bear_arena_create()
             \\declare ptr @bear_arena_alloc(ptr, i64)
             \\declare void @bear_arena_destroy(ptr)
+            \\declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64)
             \\
         );
     }
