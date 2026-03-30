@@ -813,67 +813,69 @@ unsafe fn run_neon_simd_loop(
     limit: i64,
     cond_is_lt: bool,
 ) {
-    use std::arch::aarch64::*;
-    let n = frame.len();
-    let mut f0 = frame.clone();
-    let mut f1 = frame.clone();
-    let mut f2 = frame.clone();
-    let mut f3 = frame.clone();
+    unsafe {
+        use std::arch::aarch64::*;
+        let n = frame.len();
+        let mut f0 = frame.clone();
+        let mut f1 = frame.clone();
+        let mut f2 = frame.clone();
+        let mut f3 = frame.clone();
 
-    for op in body {
-        f1[op.dst as usize] = eval_simd_op(op, &f1, int_pool);
-    }
-    for _ in 0..2 {
         for op in body {
-            f2[op.dst as usize] = eval_simd_op(op, &f2, int_pool);
+            f1[op.dst as usize] = eval_simd_op(op, &f1, int_pool);
         }
-    }
-    for _ in 0..3 {
-        for op in body {
-            f3[op.dst as usize] = eval_simd_op(op, &f3, int_pool);
+        for _ in 0..2 {
+            for op in body {
+                f2[op.dst as usize] = eval_simd_op(op, &f2, int_pool);
+            }
         }
-    }
+        for _ in 0..3 {
+            for op in body {
+                f3[op.dst as usize] = eval_simd_op(op, &f3, int_pool);
+            }
+        }
 
-    let mut f0_next = f0.clone();
-    for _ in 0..4 {
-        for op in body {
-            f0_next[op.dst as usize] = eval_simd_op(op, &f0_next, int_pool);
+        let mut f0_next = f0.clone();
+        for _ in 0..4 {
+            for op in body {
+                f0_next[op.dst as usize] = eval_simd_op(op, &f0_next, int_pool);
+            }
         }
-    }
-    let delta: Vec<i64> = (0..n).map(|i| f0_next[i].wrapping_sub(f0[i])).collect();
+        let delta: Vec<i64> = (0..n).map(|i| f0_next[i].wrapping_sub(f0[i])).collect();
 
-    let all_active = |fa: &[i64], fb: &[i64], fc: &[i64], fd: &[i64]| -> bool {
-        let check = |f: &[i64]| {
-            let cv = f[cond_reg as usize];
-            if cond_is_lt { cv < limit } else { cv > limit }
+        let all_active = |fa: &[i64], fb: &[i64], fc: &[i64], fd: &[i64]| -> bool {
+            let check = |f: &[i64]| {
+                let cv = f[cond_reg as usize];
+                if cond_is_lt { cv < limit } else { cv > limit }
+            };
+            check(fa) && check(fb) && check(fc) && check(fd)
         };
-        check(fa) && check(fb) && check(fc) && check(fd)
-    };
 
-    while all_active(&f0, &f1, &f2, &f3) {
-        let mut i = 0;
-        while i + 2 <= n {
-            let d = vld1q_s64(delta.as_ptr().add(i));
-            let v0 = vld1q_s64(f0.as_ptr().add(i));
-            let v1 = vld1q_s64(f1.as_ptr().add(i));
-            let v2 = vld1q_s64(f2.as_ptr().add(i));
-            let v3 = vld1q_s64(f3.as_ptr().add(i));
-            vst1q_s64(f0.as_mut_ptr().add(i), vaddq_s64(v0, d));
-            vst1q_s64(f1.as_mut_ptr().add(i), vaddq_s64(v1, d));
-            vst1q_s64(f2.as_mut_ptr().add(i), vaddq_s64(v2, d));
-            vst1q_s64(f3.as_mut_ptr().add(i), vaddq_s64(v3, d));
-            i += 2;
+        while all_active(&f0, &f1, &f2, &f3) {
+            let mut i = 0;
+            while i + 2 <= n {
+                let d = vld1q_s64(delta.as_ptr().add(i));
+                let v0 = vld1q_s64(f0.as_ptr().add(i));
+                let v1 = vld1q_s64(f1.as_ptr().add(i));
+                let v2 = vld1q_s64(f2.as_ptr().add(i));
+                let v3 = vld1q_s64(f3.as_ptr().add(i));
+                vst1q_s64(f0.as_mut_ptr().add(i), vaddq_s64(v0, d));
+                vst1q_s64(f1.as_mut_ptr().add(i), vaddq_s64(v1, d));
+                vst1q_s64(f2.as_mut_ptr().add(i), vaddq_s64(v2, d));
+                vst1q_s64(f3.as_mut_ptr().add(i), vaddq_s64(v3, d));
+                i += 2;
+            }
+            while i < n {
+                f0[i] = f0[i].wrapping_add(delta[i]);
+                f1[i] = f1[i].wrapping_add(delta[i]);
+                f2[i] = f2[i].wrapping_add(delta[i]);
+                f3[i] = f3[i].wrapping_add(delta[i]);
+                i += 1;
+            }
         }
-        while i < n {
-            f0[i] = f0[i].wrapping_add(delta[i]);
-            f1[i] = f1[i].wrapping_add(delta[i]);
-            f2[i] = f2[i].wrapping_add(delta[i]);
-            f3[i] = f3[i].wrapping_add(delta[i]);
-            i += 1;
-        }
+        run_scalar_simd_loop(body, int_pool, &mut f0, cond_reg, limit, cond_is_lt);
+        *frame = f0;
     }
-    run_scalar_simd_loop(body, int_pool, &mut f0, cond_reg, limit, cond_is_lt);
-    *frame = f0;
 }
 
 #[cfg(target_arch = "x86_64")]
