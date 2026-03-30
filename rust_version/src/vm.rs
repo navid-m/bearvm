@@ -590,7 +590,7 @@ impl<'p> Compiler<'p> {
 
             let cond_is_lt = cond_ins.op == Op::Lt;
             if cond_ins.flag & 0x01 != 0 { i += 1; continue; }
-            let loop_var_reg = cond_ins.a; // the register being compared
+            let loop_var_reg = cond_ins.a;
             let limit_is_pool = cond_ins.flag & 0x02 != 0;
             let limit_val = cond_ins.b;
 
