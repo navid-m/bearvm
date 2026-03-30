@@ -5,6 +5,7 @@ pub enum Token {
     Ident(String),
     Reg(String),
     Func(String),
+    Label(String),
     Const,
     Add,
     Sub,
@@ -17,8 +18,15 @@ pub enum Token {
     Call,
     While,
     Alloc,
+    AllocArray,
     Set,
     Struct,
+    Store,
+    Load,
+    GetIndexRef,
+    GetFieldRef,
+    Jmp,
+    BrIf,
     TyInt,
     TyVoid,
     TyString,
@@ -150,13 +158,38 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, String> {
                     "call" => Token::Call,
                     "while" => Token::While,
                     "alloc" => Token::Alloc,
+                    "alloc_array" => Token::AllocArray,
                     "set" => Token::Set,
                     "struct" => Token::Struct,
+                    "store" => Token::Store,
+                    "load" => Token::Load,
+                    "get_index_ref" => Token::GetIndexRef,
+                    "get_field_ref" => Token::GetFieldRef,
+                    "jmp" => Token::Jmp,
+                    "br_if" => Token::BrIf,
                     "int" => Token::TyInt,
                     "void" => Token::TyVoid,
                     "string" => Token::TyString,
                     "bool" => Token::TyBool,
-                    _ => Token::Ident(word),
+                    _ => {
+                        let j = i;
+                        if j < chars.len() && chars[j] == ':' {
+                            let after = j + 1;
+                            let mut k = after;
+                            while k < chars.len() && chars[k] == ' ' {
+                                k += 1;
+                            }
+                            let next = chars.get(k).copied();
+                            if matches!(next, None | Some('\n') | Some('\r') | Some(';')) {
+                                i = after;
+                                Token::Label(word)
+                            } else {
+                                Token::Ident(word)
+                            }
+                        } else {
+                            Token::Ident(word)
+                        }
+                    }
                 };
                 tokens.push(tok);
             }
@@ -193,16 +226,16 @@ mod tests {
     #[test]
     fn keywords() {
         let toks = lex("const add sub mul div lt gt eq ret call while alloc set struct");
-        assert_eq!(toks[0],  Token::Const);
-        assert_eq!(toks[1],  Token::Add);
-        assert_eq!(toks[2],  Token::Sub);
-        assert_eq!(toks[3],  Token::Mul);
-        assert_eq!(toks[4],  Token::Div);
-        assert_eq!(toks[5],  Token::Lt);
-        assert_eq!(toks[6],  Token::Gt);
-        assert_eq!(toks[7],  Token::Eq);
-        assert_eq!(toks[8],  Token::Ret);
-        assert_eq!(toks[9],  Token::Call);
+        assert_eq!(toks[0], Token::Const);
+        assert_eq!(toks[1], Token::Add);
+        assert_eq!(toks[2], Token::Sub);
+        assert_eq!(toks[3], Token::Mul);
+        assert_eq!(toks[4], Token::Div);
+        assert_eq!(toks[5], Token::Lt);
+        assert_eq!(toks[6], Token::Gt);
+        assert_eq!(toks[7], Token::Eq);
+        assert_eq!(toks[8], Token::Ret);
+        assert_eq!(toks[9], Token::Call);
         assert_eq!(toks[10], Token::While);
         assert_eq!(toks[11], Token::Alloc);
         assert_eq!(toks[12], Token::Set);

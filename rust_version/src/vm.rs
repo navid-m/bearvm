@@ -86,6 +86,15 @@ enum HeapVal {
     Str(String),
     Ptr(Vec<u8>),
     Struct(String, FxHashMap<String, Slot>),
+    Array(String, Vec<String>, Vec<FxHashMap<String, Slot>>),
+    Ref(u32, RefTarget),
+}
+
+/// Describes what a Ref points to inside a heap object.
+#[derive(Clone, Debug)]
+enum RefTarget {
+    /// Points to a named field of a Struct or an Array element
+    Field(usize, String),
 }
 
 #[derive(Debug, Clone)]
@@ -448,6 +457,12 @@ unsafe fn run_avx2_loop(
     *frame = f0;
 }
 
+enum ExecResult {
+    None,
+    Return(Slot),
+    Jump(String),
+}
+
 struct Vm<'a> {
     program: &'a Program,
     func_index: FxHashMap<&'a str, usize>,
@@ -502,6 +517,8 @@ impl<'a> Vm<'a> {
                             .collect();
                         Value::Struct(Box::new((name.clone(), fields)))
                     }
+                    HeapVal::Array(_, _, _) => Value::Ptr(vec![]),
+                    HeapVal::Ref(_, _) => Value::Ptr(vec![]),
                 }
             }
         }
@@ -575,6 +592,13 @@ impl<'a> Vm<'a> {
                         self.stdout.write(&b);
                         self.stdout.write(b" { ... }\n");
                     }
+                    HeapVal::Array(name, _, _) => {
+                        let b = name.as_bytes().to_vec();
+                        self.stdout.write(b"[");
+                        self.stdout.write(&b);
+                        self.stdout.write(b"]\n");
+                    }
+                    HeapVal::Ref(_, _) => self.stdout.write(b"<ref>\n"),
                 }
             }
         }
@@ -660,6 +684,107 @@ impl<'a> Vm<'a> {
             Expr::Alloc(size_expr) => {
                 let size = self.eval_int_slot(size_expr, env)? as usize;
                 Ok(self.alloc_heap(HeapVal::Ptr(vec![0u8; size])))
+            }
+            Expr::AllocArray(struct_name, count_expr) => {
+                let count = self.eval_int_slot(count_expr, env)? as usize;
+                let field_order: Vec<String> = self
+                    .program
+                    .structs
+                    .iter()
+                    .find(|s| s.name == *struct_name)
+                    .map(|s| s.fields.iter().map(|(n, _)| n.clone()).collect())
+                    .unwrap_or_default();
+                let elements = (0..count)
+                    .map(|_| {
+                        field_order
+                            .iter()
+                            .map(|f| (f.clone(), Slot::int(0)))
+                            .collect::<FxHashMap<String, Slot>>()
+                    })
+                    .collect();
+                Ok(self.alloc_heap(HeapVal::Array(struct_name.clone(), field_order, elements)))
+            }
+            Expr::GetIndexRef(arr_reg, idx_expr) => {
+                let arr_slot = unsafe { *env.get_unchecked(*arr_reg as usize) };
+                let arr_heap_idx = arr_slot
+                    .heap_idx()
+                    .ok_or_else(|| "get_index_ref: not a heap value".to_string())?;
+                let elem_idx = self.eval_int_slot(idx_expr, env)? as usize;
+                match &self.heap[arr_heap_idx as usize] {
+                    HeapVal::Array(_, _, elems) => {
+                        if elem_idx >= elems.len() {
+                            return Err(format!(
+                                "get_index_ref: index {elem_idx} out of bounds (len {})",
+                                elems.len()
+                            ));
+                        }
+                    }
+                    _ => return Err("get_index_ref: not an array".into()),
+                }
+                Ok(self.alloc_heap(HeapVal::Ref(
+                    arr_heap_idx,
+                    RefTarget::Field(elem_idx, "__elem__".into()),
+                )))
+            }
+            Expr::GetFieldRef(ref_reg, field) => {
+                let ref_slot = unsafe { *env.get_unchecked(*ref_reg as usize) };
+                let ref_heap_idx = ref_slot
+                    .heap_idx()
+                    .ok_or_else(|| "get_field_ref: not a heap value".to_string())?;
+                match &self.heap[ref_heap_idx as usize] {
+                    HeapVal::Ref(arr_idx, RefTarget::Field(elem_idx, sentinel))
+                        if sentinel == "__elem__" =>
+                    {
+                        let arr_idx = *arr_idx;
+                        let elem_idx = *elem_idx;
+                        match &self.heap[arr_idx as usize] {
+                            HeapVal::Array(_, field_order, _) => {
+                                if !field_order.contains(field) {
+                                    return Err(format!("get_field_ref: no field '{field}'"));
+                                }
+                            }
+                            _ => return Err("get_field_ref: ref target is not an array".into()),
+                        }
+                        Ok(self.alloc_heap(HeapVal::Ref(
+                            arr_idx,
+                            RefTarget::Field(elem_idx, field.clone()),
+                        )))
+                    }
+                    HeapVal::Struct(_, fields) => {
+                        if !fields.contains_key(field.as_str()) {
+                            return Err(format!("get_field_ref: no field '{field}'"));
+                        }
+                        Ok(self.alloc_heap(HeapVal::Ref(
+                            ref_heap_idx,
+                            RefTarget::Field(0, field.clone()),
+                        )))
+                    }
+                    _ => Err("get_field_ref: not a ref or struct".into()),
+                }
+            }
+            Expr::Load(ref_reg) => {
+                let ref_slot = unsafe { *env.get_unchecked(*ref_reg as usize) };
+                let ref_heap_idx = ref_slot
+                    .heap_idx()
+                    .ok_or_else(|| "load: not a heap value".to_string())?
+                    as usize;
+                match &self.heap[ref_heap_idx] {
+                    HeapVal::Ref(target_idx, RefTarget::Field(elem_idx, field)) => {
+                        let target_idx = *target_idx as usize;
+                        let elem_idx = *elem_idx;
+                        let field = field.clone();
+                        match &self.heap[target_idx] {
+                            HeapVal::Array(_, _, elems) => {
+                                Ok(elems[elem_idx].get(&field).copied().unwrap_or(Slot::void()))
+                            }
+                            HeapVal::Struct(_, fields) => {
+                                Ok(fields.get(&field).copied().unwrap_or(Slot::void()))
+                            }
+                            _ => Err("load: ref target is not an array or struct".into()),
+                        }
+                    }
+                    _ => Err("load: not a ref".into()),
+                }
             }
             Expr::StructLit(name, field_exprs) => {
                 let mut fields: FxHashMap<String, Slot> = FxHashMap::default();
@@ -821,21 +946,36 @@ impl<'a> Vm<'a> {
 
     #[inline]
     fn exec_body(&mut self, stmts: &[Stmt], env: &mut [Slot]) -> Result<Option<Slot>, String> {
-        for stmt in stmts {
-            if let Some(v) = self.exec_stmt(stmt, env)? {
-                return Ok(Some(v));
+        let mut label_map: FxHashMap<&str, usize> = FxHashMap::default();
+        for (i, stmt) in stmts.iter().enumerate() {
+            if let Stmt::Label(name) = stmt {
+                label_map.insert(name.as_str(), i);
             }
+        }
+
+        let mut pc = 0usize;
+        while pc < stmts.len() {
+            match self.exec_stmt(&stmts[pc], env)? {
+                ExecResult::Return(v) => return Ok(Some(v)),
+                ExecResult::Jump(label) => {
+                    pc = *label_map
+                        .get(label.as_str())
+                        .ok_or_else(|| format!("undefined label '{label}'"))?;
+                }
+                ExecResult::None => {}
+            }
+            pc += 1;
         }
         Ok(None)
     }
 
     #[inline]
-    fn exec_stmt(&mut self, stmt: &Stmt, env: &mut [Slot]) -> Result<Option<Slot>, String> {
+    fn exec_stmt(&mut self, stmt: &Stmt, env: &mut [Slot]) -> Result<ExecResult, String> {
         match stmt {
             Stmt::Assign(reg, expr) => {
                 let val = self.eval_slot(expr, env)?;
                 *unsafe { env.get_unchecked_mut(*reg as usize) } = val;
-                Ok(None)
+                Ok(ExecResult::None)
             }
             Stmt::SetField(reg, field, expr) => {
                 let val = self.eval_slot(expr, env)?;
@@ -850,14 +990,52 @@ impl<'a> Vm<'a> {
                     }
                     _ => return Err("set: register is not a struct".into()),
                 }
-                Ok(None)
+                Ok(ExecResult::None)
             }
             Stmt::Call(name, args) => {
                 self.call_func(name, args, env)?;
-                Ok(None)
+                Ok(ExecResult::None)
             }
-            Stmt::Ret(expr) => Ok(Some(self.eval_slot(expr, env)?)),
-            Stmt::While(cond, body) => self.exec_while(cond, body, env),
+            Stmt::Ret(expr) => Ok(ExecResult::Return(self.eval_slot(expr, env)?)),
+            Stmt::While(cond, body) => {
+                if let Some(v) = self.exec_while(cond, body, env)? {
+                    return Ok(ExecResult::Return(v));
+                }
+                Ok(ExecResult::None)
+            }
+            Stmt::Label(_) => Ok(ExecResult::None),
+            Stmt::Jmp(label) => Ok(ExecResult::Jump(label.clone())),
+            Stmt::BrIf(cond, true_label, false_label) => {
+                let taken = match self.eval_slot(cond, env)? {
+                    s if s.tag == Tag::Bool => unsafe { s.raw.bool },
+                    s if s.tag == Tag::Int => unsafe { s.raw.int != 0 },
+                    s => return Err(format!("br_if: condition must be bool, got {:?}", s.tag)),
+                };
+                let target = if taken { true_label } else { false_label };
+                Ok(ExecResult::Jump(target.clone()))
+            }
+            Stmt::Store(ref_reg, val_expr) => {
+                let val = self.eval_slot(val_expr, env)?;
+                let ref_slot = unsafe { *env.get_unchecked(*ref_reg as usize) };
+                let ref_heap_idx = ref_slot
+                    .heap_idx()
+                    .ok_or_else(|| "store: not a heap value".to_string())?
+                    as usize;
+                let (target_idx, elem_idx, field) = match &self.heap[ref_heap_idx] {
+                    HeapVal::Ref(t, RefTarget::Field(ei, f)) => (*t as usize, *ei, f.clone()),
+                    _ => return Err("store: not a ref".into()),
+                };
+                match &mut self.heap[target_idx] {
+                    HeapVal::Array(_, _, elems) => {
+                        elems[elem_idx].insert(field, val);
+                    }
+                    HeapVal::Struct(_, fields) => {
+                        fields.insert(field, val);
+                    }
+                    _ => return Err("store: ref target is not an array or struct".into()),
+                }
+                Ok(ExecResult::None)
+            }
         }
     }
 

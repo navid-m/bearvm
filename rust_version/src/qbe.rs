@@ -176,6 +176,10 @@ impl Emitter {
                 Ok(format!("%{ptr}"))
             }
             Expr::Call(name, args) => self.emit_call(name, args, env, func_out, true),
+            Expr::AllocArray(_, _)
+            | Expr::GetIndexRef(_, _)
+            | Expr::GetFieldRef(_, _)
+            | Expr::Load(_) => Err("qbe: alloc_array/get_index_ref/get_field_ref/load not yet implemented in QBE backend".into()),
         }
     }
 
@@ -291,6 +295,9 @@ impl Emitter {
                 func_out.push_str(&format!("  jmp {lstart}\n"));
                 func_out.push_str(&format!("{lend}\n"));
                 Ok(())
+            }
+            Stmt::Label(_) | Stmt::Jmp(_) | Stmt::BrIf(_, _, _) | Stmt::Store(_, _) => {
+                Err("qbe: label/jmp/br_if/store not yet implemented in QBE backend".into())
             }
         }
     }

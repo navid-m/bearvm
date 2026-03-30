@@ -64,6 +64,18 @@ pub enum Stmt {
 
     /// while (<cond>) { <body> }
     While(Expr, Vec<Stmt>),
+
+    /// label:
+    Label(String),
+
+    /// jmp label
+    Jmp(String),
+
+    /// br_if %cond, true_label, false_label
+    BrIf(Expr, String, String),
+
+    /// store %ref, <val>
+    Store(RegIdx, Expr),
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +121,18 @@ pub enum Expr {
 
     /// alloc <size>
     Alloc(Box<Expr>),
+
+    /// alloc_array StructName, <count>
+    AllocArray(String, Box<Expr>),
+
+    /// get_index_ref %arr, %i  — returns a Ref pointing to element i
+    GetIndexRef(RegIdx, Box<Expr>),
+
+    /// get_field_ref %ref, field  — returns a Ref pointing to a field
+    GetFieldRef(RegIdx, String),
+
+    /// load %ref  — dereference a Ref
+    Load(RegIdx),
 
     /// StructName { field: val, ... }
     StructLit(String, Vec<(String, Expr)>),

@@ -173,6 +173,35 @@ impl Parser {
                 let size = self.parse_expr(rm)?;
                 Ok(Expr::Alloc(Box::new(size)))
             }
+            Token::AllocArray => {
+                self.advance();
+                let struct_name = self.expect_ident()?;
+                self.expect(&Token::Comma)?;
+                let count = self.parse_expr(rm)?;
+                Ok(Expr::AllocArray(struct_name, Box::new(count)))
+            }
+            Token::GetIndexRef => {
+                self.advance();
+                let r = self.expect_reg()?;
+                let idx = rm.intern(&r);
+                self.expect(&Token::Comma)?;
+                let i = self.parse_expr(rm)?;
+                Ok(Expr::GetIndexRef(idx, Box::new(i)))
+            }
+            Token::GetFieldRef => {
+                self.advance();
+                let r = self.expect_reg()?;
+                let idx = rm.intern(&r);
+                self.expect(&Token::Comma)?;
+                let field = self.expect_ident()?;
+                Ok(Expr::GetFieldRef(idx, field))
+            }
+            Token::Load => {
+                self.advance();
+                let r = self.expect_reg()?;
+                let idx = rm.intern(&r);
+                Ok(Expr::Load(idx))
+            }
             Token::Int(n) => {
                 self.advance();
                 Ok(Expr::Int(n))
@@ -257,6 +286,32 @@ impl Parser {
                 }
                 self.expect(&Token::RBrace)?;
                 Ok(Stmt::While(cond, body))
+            }
+            Token::Label(name) => {
+                self.advance();
+                Ok(Stmt::Label(name))
+            }
+            Token::Jmp => {
+                self.advance();
+                let label = self.expect_ident()?;
+                Ok(Stmt::Jmp(label))
+            }
+            Token::BrIf => {
+                self.advance();
+                let cond = self.parse_expr(rm)?;
+                self.expect(&Token::Comma)?;
+                let true_label = self.expect_ident()?;
+                self.expect(&Token::Comma)?;
+                let false_label = self.expect_ident()?;
+                Ok(Stmt::BrIf(cond, true_label, false_label))
+            }
+            Token::Store => {
+                self.advance();
+                let r = self.expect_reg()?;
+                let idx = rm.intern(&r);
+                self.expect(&Token::Comma)?;
+                let val = self.parse_expr(rm)?;
+                Ok(Stmt::Store(idx, val))
             }
             t => Err(format!("Unexpected token in statement: {t:?}")),
         }
