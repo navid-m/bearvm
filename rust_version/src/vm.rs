@@ -154,6 +154,7 @@ pub enum Op {
     Ret,
     RetVoid,
     SetLabel,
+    SimdLoop,
 }
 
 /// A single flat instruction. Kept small (8 bytes) for cache friendliness.
@@ -180,6 +181,17 @@ pub struct FieldEntry {
     pub src_reg: u16,
 }
 
+/// One step inside a SIMD loop body: dst = op(a, b).
+/// flag 0x1 = a is int_pool idx, 0x2 = b is int_pool idx.
+#[derive(Clone, Copy, Debug)]
+pub struct SimdOp {
+    pub op: Op,
+    pub flag: u8,
+    pub dst: u16,
+    pub a: u16,
+    pub b: u16,
+}
+
 /// Compiled function — owns its instruction array and constant pools.
 pub struct CompiledFn {
     pub n_regs: u16,
@@ -190,6 +202,7 @@ pub struct CompiledFn {
     pub arg_regs: Vec<u16>,
     pub arg_ranges: Vec<ArgRange>,
     pub field_entries: Vec<FieldEntry>,
+    pub simd_loops: Vec<Vec<SimdOp>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -218,6 +231,7 @@ struct Compiler<'p> {
     arg_regs: Vec<u16>,
     arg_ranges: Vec<ArgRange>,
     field_entries: Vec<FieldEntry>,
+    simd_loops: Vec<Vec<SimdOp>>,
     patches: Vec<(u32, u8, String)>,
     label_pcs: FxHashMap<String, u32>,
     max_reg: u16,
@@ -235,6 +249,7 @@ impl<'p> Compiler<'p> {
             arg_regs: Vec::new(),
             arg_ranges: Vec::new(),
             field_entries: Vec::new(),
+            simd_loops: Vec::new(),
             patches: Vec::new(),
             label_pcs: FxHashMap::default(),
             max_reg: 0,
@@ -531,6 +546,7 @@ impl<'p> Compiler<'p> {
         if self.code.is_empty() || !matches!(self.code.last().unwrap().op, Op::Ret | Op::RetVoid) {
             self.emit(Self::instr(Op::RetVoid, 0, 0, 0, 0));
         }
+        self.rewrite_simd_loops();
         let actual_n_regs = n_regs.max(self.max_reg + 1);
         Ok(CompiledFn {
             n_regs: actual_n_regs,
@@ -541,7 +557,60 @@ impl<'p> Compiler<'p> {
             arg_regs: self.arg_regs,
             arg_ranges: self.arg_ranges,
             field_entries: self.field_entries,
+            simd_loops: self.simd_loops,
         })
+    }
+
+    fn rewrite_simd_loops(&mut self) {
+        let n = self.code.len();
+        let mut i = 0;
+        while i + 2 < n {
+            let cond_ins = self.code[i];
+            if !matches!(cond_ins.op, Op::Lt | Op::Gt) { i += 1; continue; }
+            let br_ins = self.code[i + 1];
+            if br_ins.op != Op::BrIf { i += 1; continue; }
+            if br_ins.dst != cond_ins.dst { i += 1; continue; }
+
+            let body_start = br_ins.a as usize;
+            let exit_pc    = br_ins.b as usize;
+
+            if body_start != i + 2 { i += 1; continue; }
+            if exit_pc <= body_start { i += 1; continue; }
+
+            let jmp_pc = exit_pc - 1;
+            if jmp_pc < body_start { i += 1; continue; }
+            let jmp_ins = self.code[jmp_pc];
+            if jmp_ins.op != Op::Jmp || jmp_ins.a as usize != i { i += 1; continue; }
+
+            let body_slice = &self.code[body_start..jmp_pc];
+            let all_arith = body_slice.iter().all(|ins| {
+                matches!(ins.op, Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Lt | Op::Gt | Op::Move | Op::LoadInt | Op::SetLabel)
+            });
+            if !all_arith { i += 1; continue; }
+
+            let cond_is_lt = cond_ins.op == Op::Lt;
+            if cond_ins.flag & 0x01 != 0 { i += 1; continue; }
+            let loop_var_reg = cond_ins.a; // the register being compared
+            let limit_is_pool = cond_ins.flag & 0x02 != 0;
+            let limit_val = cond_ins.b;
+
+            let simd_body: Vec<SimdOp> = body_slice.iter()
+                .filter(|ins| !matches!(ins.op, Op::SetLabel))
+                .map(|ins| SimdOp { op: ins.op, flag: ins.flag, dst: ins.dst, a: ins.a, b: ins.b })
+                .collect();
+
+            if simd_body.is_empty() { i += 1; continue; }
+
+            let loop_idx = self.simd_loops.len() as u16;
+            self.simd_loops.push(simd_body);
+
+            let flag: u8 = (cond_is_lt as u8) | ((limit_is_pool as u8) << 1);
+            self.code[i] = Self::instr(Op::SimdLoop, flag, loop_var_reg, loop_idx, limit_val);
+            for j in (i + 1)..exit_pc {
+                self.code[j] = Self::instr(Op::SetLabel, 0, 0, 0, 0);
+            }
+            i = exit_pc;
+        }
     }
 }
 
@@ -569,6 +638,137 @@ fn compile_function(
         c.compile_stmt(stmt)?;
     }
     c.finish(func.n_regs)
+}
+
+/// Evaluate one SimdOp against a flat i64 frame.
+#[inline(always)]
+fn eval_simd_op(op: &SimdOp, frame: &[i64], int_pool: &[i64]) -> i64 {
+    let a = if op.flag & 0x01 != 0 { int_pool[op.a as usize] } else { frame[op.a as usize] };
+    let b = if op.flag & 0x02 != 0 { int_pool[op.b as usize] } else { frame[op.b as usize] };
+    match op.op {
+        Op::Add => a.wrapping_add(b),
+        Op::Sub => a.wrapping_sub(b),
+        Op::Mul => a.wrapping_mul(b),
+        Op::Div => if b == 0 { 0 } else { a / b },
+        Op::Lt  => (a < b) as i64,
+        Op::Gt  => (a > b) as i64,
+        Op::Move => a,
+        Op::LoadInt => int_pool[op.a as usize],
+        _ => 0,
+    }
+}
+
+fn run_scalar_simd_loop(
+    body: &[SimdOp],
+    int_pool: &[i64],
+    frame: &mut [i64],
+    cond_reg: u16,
+    limit: i64,
+    cond_is_lt: bool,
+) {
+    loop {
+        let cv = frame[cond_reg as usize];
+        if cond_is_lt { if cv >= limit { break; } } else { if cv <= limit { break; } }
+        for op in body {
+            frame[op.dst as usize] = eval_simd_op(op, frame, int_pool);
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn run_avx2_simd_loop(
+    body: &[SimdOp],
+    int_pool: &[i64],
+    frame: &mut Vec<i64>,
+    cond_reg: u16,
+    limit: i64,
+    cond_is_lt: bool,
+) {
+    use std::arch::x86_64::*;
+    let n = frame.len();
+    let mut f0 = frame.clone();
+    let mut f1 = frame.clone();
+    let mut f2 = frame.clone();
+    let mut f3 = frame.clone();
+
+    for op in body { f1[op.dst as usize] = eval_simd_op(op, &f1, int_pool); }
+    for _ in 0..2 { for op in body { f2[op.dst as usize] = eval_simd_op(op, &f2, int_pool); } }
+    for _ in 0..3 { for op in body { f3[op.dst as usize] = eval_simd_op(op, &f3, int_pool); } }
+
+    let mut f0_next = f0.clone();
+    for op in body { f0_next[op.dst as usize] = eval_simd_op(op, &f0_next, int_pool); }
+    let mut f1_next = f1.clone();
+    for op in body { f1_next[op.dst as usize] = eval_simd_op(op, &f1_next, int_pool); }
+    let mut f2_next = f2.clone();
+    for op in body { f2_next[op.dst as usize] = eval_simd_op(op, &f2_next, int_pool); }
+    let mut f3_next = f3.clone();
+    for op in body { f3_next[op.dst as usize] = eval_simd_op(op, &f3_next, int_pool); }
+
+    let delta: Vec<i64> = (0..n).map(|i| f3_next[i].wrapping_sub(f0[i])).collect();
+    let all_active = |fa: &[i64], fb: &[i64], fc: &[i64], fd: &[i64]| -> bool {
+        let check = |f: &[i64]| {
+            let cv = f[cond_reg as usize];
+            if cond_is_lt { cv < limit } else { cv > limit }
+        };
+        check(fa) && check(fb) && check(fc) && check(fd)
+    };
+
+    while all_active(&f0, &f1, &f2, &f3) {
+        let mut i = 0;
+        while i + 4 <= n {
+            let d  = _mm256_loadu_si256(delta.as_ptr().add(i) as *const __m256i);
+            let v0 = _mm256_loadu_si256(f0.as_ptr().add(i) as *const __m256i);
+            let v1 = _mm256_loadu_si256(f1.as_ptr().add(i) as *const __m256i);
+            let v2 = _mm256_loadu_si256(f2.as_ptr().add(i) as *const __m256i);
+            let v3 = _mm256_loadu_si256(f3.as_ptr().add(i) as *const __m256i);
+            _mm256_storeu_si256(f0.as_mut_ptr().add(i) as *mut __m256i, _mm256_add_epi64(v0, d));
+            _mm256_storeu_si256(f1.as_mut_ptr().add(i) as *mut __m256i, _mm256_add_epi64(v1, d));
+            _mm256_storeu_si256(f2.as_mut_ptr().add(i) as *mut __m256i, _mm256_add_epi64(v2, d));
+            _mm256_storeu_si256(f3.as_mut_ptr().add(i) as *mut __m256i, _mm256_add_epi64(v3, d));
+            i += 4;
+        }
+        while i < n {
+            f0[i] = f0[i].wrapping_add(delta[i]);
+            f1[i] = f1[i].wrapping_add(delta[i]);
+            f2[i] = f2[i].wrapping_add(delta[i]);
+            f3[i] = f3[i].wrapping_add(delta[i]);
+            i += 1;
+        }
+    }
+    run_scalar_simd_loop(body, int_pool, &mut f0, cond_reg, limit, cond_is_lt);
+    *frame = f0;
+}
+
+fn exec_simd_loop(
+    body: &[SimdOp],
+    int_pool: &[i64],
+    slots: &mut [Slot],
+    cond_reg: u16,
+    limit: i64,
+    cond_is_lt: bool,
+) {
+    let n = slots.len();
+    let mut frame: Vec<i64> = (0..n).map(|i| unsafe {
+        if slots[i].tag == Tag::Int { slots[i].raw.int } else { 0 }
+    }).collect();
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe { run_avx2_simd_loop(body, int_pool, &mut frame, cond_reg, limit, cond_is_lt); }
+        } else {
+            run_scalar_simd_loop(body, int_pool, &mut frame, cond_reg, limit, cond_is_lt);
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        run_scalar_simd_loop(body, int_pool, &mut frame, cond_reg, limit, cond_is_lt);
+    }
+
+    for i in 0..n {
+        slots[i] = Slot::int(frame[i]);
+    }
 }
 
 const STDOUT_BUF_SIZE: usize = 65536;
@@ -1061,6 +1261,21 @@ impl<'a> Vm<'a> {
                 }
                 Op::RetVoid => {
                     return Ok(Slot::void());
+                }
+                Op::SimdLoop => {
+                    let loop_idx = ins.a as usize;
+                    let limit = if ins.flag & 0x02 != 0 {
+                        cf.int_pool[ins.b as usize]
+                    } else {
+                        int_of!(reg!(ins.b))
+                    };
+                    let cond_is_lt = ins.flag & 0x01 != 0;
+                    let cond_reg = ins.dst;
+                    let body_ptr: *const Vec<SimdOp> = &cf.simd_loops[loop_idx];
+                    let body: &[SimdOp] = unsafe { (*body_ptr).as_slice() };
+                    let int_pool_ptr: *const Vec<i64> = &cf.int_pool;
+                    let int_pool: &[i64] = unsafe { (*int_pool_ptr).as_slice() };
+                    exec_simd_loop(body, int_pool, &mut regs, cond_reg, limit, cond_is_lt);
                 }
             }
         }
