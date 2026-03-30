@@ -1,5 +1,5 @@
 mod ast;
-mod interpreter;
+mod vm;
 mod lexer;
 mod parser;
 mod qbe;
@@ -48,7 +48,7 @@ fn load(path: &str) -> ast::Program {
 
 fn run_interpreter(path: &str) {
     let program = load(path);
-    interpreter::run(&program).unwrap_or_else(|e| {
+    vm::run(&program).unwrap_or_else(|e| {
         eprintln!("Runtime error: {e}");
         process::exit(1);
     });
