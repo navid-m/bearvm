@@ -11,6 +11,7 @@ enum Tag {
     Bool = 2,
     File = 3,
     Heap = 4,
+    Ref = 5,
 }
 
 #[derive(Clone, Copy)]
@@ -18,6 +19,7 @@ union RawVal {
     int: i64,
     bool: bool,
     idx: u32,
+    ref_: u64,
     _pad: u64,
 }
 
@@ -26,6 +28,9 @@ struct Slot {
     tag: Tag,
     raw: RawVal,
 }
+
+const REF_NO_FIELD: u16 = 0xFFFF;
+const REF_STRUCT_ELEM: u16 = 0xFFFF;
 
 impl Slot {
     #[inline(always)]
@@ -64,6 +69,22 @@ impl Slot {
         }
     }
     #[inline(always)]
+    fn ref_slot(target: u32, elem_idx: u16, field_pos: u16) -> Self {
+        let packed: u64 = ((target as u64) << 32) | ((elem_idx as u64) << 16) | (field_pos as u64);
+        Slot {
+            tag: Tag::Ref,
+            raw: RawVal { ref_: packed },
+        }
+    }
+    #[inline(always)]
+    fn unpack_ref(self) -> (u32, u16, u16) {
+        let v = unsafe { self.raw.ref_ };
+        let target = (v >> 32) as u32;
+        let elem_idx = ((v >> 16) & 0xFFFF) as u16;
+        let field_pos = (v & 0xFFFF) as u16;
+        (target, elem_idx, field_pos)
+    }
+    #[inline(always)]
     fn as_int(self) -> Option<i64> {
         if self.tag == Tag::Int {
             Some(unsafe { self.raw.int })
@@ -86,7 +107,6 @@ enum HeapVal {
     Ptr(Vec<u8>),
     Struct(String, FxHashMap<String, Slot>),
     Array(String, Vec<String>, Vec<FxHashMap<String, Slot>>),
-    Ref(u32, usize, String),
 }
 
 #[derive(Debug, Clone)]
@@ -566,40 +586,88 @@ impl<'p> Compiler<'p> {
         let mut i = 0;
         while i + 2 < n {
             let cond_ins = self.code[i];
-            if !matches!(cond_ins.op, Op::Lt | Op::Gt) { i += 1; continue; }
+            if !matches!(cond_ins.op, Op::Lt | Op::Gt) {
+                i += 1;
+                continue;
+            }
             let br_ins = self.code[i + 1];
-            if br_ins.op != Op::BrIf { i += 1; continue; }
-            if br_ins.dst != cond_ins.dst { i += 1; continue; }
+            if br_ins.op != Op::BrIf {
+                i += 1;
+                continue;
+            }
+            if br_ins.dst != cond_ins.dst {
+                i += 1;
+                continue;
+            }
 
             let body_start = br_ins.a as usize;
-            let exit_pc    = br_ins.b as usize;
+            let exit_pc = br_ins.b as usize;
 
-            if body_start != i + 2 { i += 1; continue; }
-            if exit_pc <= body_start { i += 1; continue; }
+            if body_start != i + 2 {
+                i += 1;
+                continue;
+            }
+            if exit_pc <= body_start {
+                i += 1;
+                continue;
+            }
 
             let jmp_pc = exit_pc - 1;
-            if jmp_pc < body_start { i += 1; continue; }
+            if jmp_pc < body_start {
+                i += 1;
+                continue;
+            }
             let jmp_ins = self.code[jmp_pc];
-            if jmp_ins.op != Op::Jmp || jmp_ins.a as usize != i { i += 1; continue; }
+            if jmp_ins.op != Op::Jmp || jmp_ins.a as usize != i {
+                i += 1;
+                continue;
+            }
 
             let body_slice = &self.code[body_start..jmp_pc];
             let all_arith = body_slice.iter().all(|ins| {
-                matches!(ins.op, Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Lt | Op::Gt | Op::Move | Op::LoadInt | Op::SetLabel)
+                matches!(
+                    ins.op,
+                    Op::Add
+                        | Op::Sub
+                        | Op::Mul
+                        | Op::Div
+                        | Op::Lt
+                        | Op::Gt
+                        | Op::Move
+                        | Op::LoadInt
+                        | Op::SetLabel
+                )
             });
-            if !all_arith { i += 1; continue; }
+            if !all_arith {
+                i += 1;
+                continue;
+            }
 
             let cond_is_lt = cond_ins.op == Op::Lt;
-            if cond_ins.flag & 0x01 != 0 { i += 1; continue; }
+            if cond_ins.flag & 0x01 != 0 {
+                i += 1;
+                continue;
+            }
             let loop_var_reg = cond_ins.a;
             let limit_is_pool = cond_ins.flag & 0x02 != 0;
             let limit_val = cond_ins.b;
 
-            let simd_body: Vec<SimdOp> = body_slice.iter()
+            let simd_body: Vec<SimdOp> = body_slice
+                .iter()
                 .filter(|ins| !matches!(ins.op, Op::SetLabel))
-                .map(|ins| SimdOp { op: ins.op, flag: ins.flag, dst: ins.dst, a: ins.a, b: ins.b })
+                .map(|ins| SimdOp {
+                    op: ins.op,
+                    flag: ins.flag,
+                    dst: ins.dst,
+                    a: ins.a,
+                    b: ins.b,
+                })
                 .collect();
 
-            if simd_body.is_empty() { i += 1; continue; }
+            if simd_body.is_empty() {
+                i += 1;
+                continue;
+            }
 
             let loop_idx = self.simd_loops.len() as u16;
             self.simd_loops.push(simd_body);
@@ -643,15 +711,29 @@ fn compile_function(
 /// Evaluate one SimdOp against a flat i64 frame.
 #[inline(always)]
 fn eval_simd_op(op: &SimdOp, frame: &[i64], int_pool: &[i64]) -> i64 {
-    let a = if op.flag & 0x01 != 0 { int_pool[op.a as usize] } else { frame[op.a as usize] };
-    let b = if op.flag & 0x02 != 0 { int_pool[op.b as usize] } else { frame[op.b as usize] };
+    let a = if op.flag & 0x01 != 0 {
+        int_pool[op.a as usize]
+    } else {
+        frame[op.a as usize]
+    };
+    let b = if op.flag & 0x02 != 0 {
+        int_pool[op.b as usize]
+    } else {
+        frame[op.b as usize]
+    };
     match op.op {
         Op::Add => a.wrapping_add(b),
         Op::Sub => a.wrapping_sub(b),
         Op::Mul => a.wrapping_mul(b),
-        Op::Div => if b == 0 { 0 } else { a / b },
-        Op::Lt  => (a < b) as i64,
-        Op::Gt  => (a > b) as i64,
+        Op::Div => {
+            if b == 0 {
+                0
+            } else {
+                a / b
+            }
+        }
+        Op::Lt => (a < b) as i64,
+        Op::Gt => (a > b) as i64,
         Op::Move => a,
         Op::LoadInt => int_pool[op.a as usize],
         _ => 0,
@@ -668,7 +750,15 @@ fn run_scalar_simd_loop(
 ) {
     loop {
         let cv = frame[cond_reg as usize];
-        if cond_is_lt { if cv >= limit { break; } } else { if cv <= limit { break; } }
+        if cond_is_lt {
+            if cv >= limit {
+                break;
+            }
+        } else {
+            if cv <= limit {
+                break;
+            }
+        }
         for op in body {
             frame[op.dst as usize] = eval_simd_op(op, frame, int_pool);
         }
@@ -692,18 +782,36 @@ unsafe fn run_avx2_simd_loop(
     let mut f2 = frame.clone();
     let mut f3 = frame.clone();
 
-    for op in body { f1[op.dst as usize] = eval_simd_op(op, &f1, int_pool); }
-    for _ in 0..2 { for op in body { f2[op.dst as usize] = eval_simd_op(op, &f2, int_pool); } }
-    for _ in 0..3 { for op in body { f3[op.dst as usize] = eval_simd_op(op, &f3, int_pool); } }
+    for op in body {
+        f1[op.dst as usize] = eval_simd_op(op, &f1, int_pool);
+    }
+    for _ in 0..2 {
+        for op in body {
+            f2[op.dst as usize] = eval_simd_op(op, &f2, int_pool);
+        }
+    }
+    for _ in 0..3 {
+        for op in body {
+            f3[op.dst as usize] = eval_simd_op(op, &f3, int_pool);
+        }
+    }
 
     let mut f0_next = f0.clone();
-    for op in body { f0_next[op.dst as usize] = eval_simd_op(op, &f0_next, int_pool); }
+    for op in body {
+        f0_next[op.dst as usize] = eval_simd_op(op, &f0_next, int_pool);
+    }
     let mut f1_next = f1.clone();
-    for op in body { f1_next[op.dst as usize] = eval_simd_op(op, &f1_next, int_pool); }
+    for op in body {
+        f1_next[op.dst as usize] = eval_simd_op(op, &f1_next, int_pool);
+    }
     let mut f2_next = f2.clone();
-    for op in body { f2_next[op.dst as usize] = eval_simd_op(op, &f2_next, int_pool); }
+    for op in body {
+        f2_next[op.dst as usize] = eval_simd_op(op, &f2_next, int_pool);
+    }
     let mut f3_next = f3.clone();
-    for op in body { f3_next[op.dst as usize] = eval_simd_op(op, &f3_next, int_pool); }
+    for op in body {
+        f3_next[op.dst as usize] = eval_simd_op(op, &f3_next, int_pool);
+    }
 
     let delta: Vec<i64> = (0..n).map(|i| f3_next[i].wrapping_sub(f0[i])).collect();
     let all_active = |fa: &[i64], fb: &[i64], fc: &[i64], fd: &[i64]| -> bool {
@@ -717,15 +825,27 @@ unsafe fn run_avx2_simd_loop(
     while all_active(&f0, &f1, &f2, &f3) {
         let mut i = 0;
         while i + 4 <= n {
-            let d  = _mm256_loadu_si256(delta.as_ptr().add(i) as *const __m256i);
+            let d = _mm256_loadu_si256(delta.as_ptr().add(i) as *const __m256i);
             let v0 = _mm256_loadu_si256(f0.as_ptr().add(i) as *const __m256i);
             let v1 = _mm256_loadu_si256(f1.as_ptr().add(i) as *const __m256i);
             let v2 = _mm256_loadu_si256(f2.as_ptr().add(i) as *const __m256i);
             let v3 = _mm256_loadu_si256(f3.as_ptr().add(i) as *const __m256i);
-            _mm256_storeu_si256(f0.as_mut_ptr().add(i) as *mut __m256i, _mm256_add_epi64(v0, d));
-            _mm256_storeu_si256(f1.as_mut_ptr().add(i) as *mut __m256i, _mm256_add_epi64(v1, d));
-            _mm256_storeu_si256(f2.as_mut_ptr().add(i) as *mut __m256i, _mm256_add_epi64(v2, d));
-            _mm256_storeu_si256(f3.as_mut_ptr().add(i) as *mut __m256i, _mm256_add_epi64(v3, d));
+            _mm256_storeu_si256(
+                f0.as_mut_ptr().add(i) as *mut __m256i,
+                _mm256_add_epi64(v0, d),
+            );
+            _mm256_storeu_si256(
+                f1.as_mut_ptr().add(i) as *mut __m256i,
+                _mm256_add_epi64(v1, d),
+            );
+            _mm256_storeu_si256(
+                f2.as_mut_ptr().add(i) as *mut __m256i,
+                _mm256_add_epi64(v2, d),
+            );
+            _mm256_storeu_si256(
+                f3.as_mut_ptr().add(i) as *mut __m256i,
+                _mm256_add_epi64(v3, d),
+            );
             i += 4;
         }
         while i < n {
@@ -749,14 +869,22 @@ fn exec_simd_loop(
     cond_is_lt: bool,
 ) {
     let n = slots.len();
-    let mut frame: Vec<i64> = (0..n).map(|i| unsafe {
-        if slots[i].tag == Tag::Int { slots[i].raw.int } else { 0 }
-    }).collect();
+    let mut frame: Vec<i64> = (0..n)
+        .map(|i| unsafe {
+            if slots[i].tag == Tag::Int {
+                slots[i].raw.int
+            } else {
+                0
+            }
+        })
+        .collect();
 
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") {
-            unsafe { run_avx2_simd_loop(body, int_pool, &mut frame, cond_reg, limit, cond_is_lt); }
+            unsafe {
+                run_avx2_simd_loop(body, int_pool, &mut frame, cond_reg, limit, cond_is_lt);
+            }
         } else {
             run_scalar_simd_loop(body, int_pool, &mut frame, cond_reg, limit, cond_is_lt);
         }
@@ -860,6 +988,7 @@ impl<'a> Vm<'a> {
             Tag::Int => Value::Int(unsafe { s.raw.int }),
             Tag::Bool => Value::Bool(unsafe { s.raw.bool }),
             Tag::File => Value::File(unsafe { s.raw.int }),
+            Tag::Ref => Value::Void,
             Tag::Heap => {
                 let idx = unsafe { s.raw.idx } as usize;
                 match &self.heap[idx] {
@@ -872,7 +1001,7 @@ impl<'a> Vm<'a> {
                             .collect();
                         Value::Struct(Box::new((name.clone(), fields)))
                     }
-                    HeapVal::Array(..) | HeapVal::Ref(..) => Value::Ptr(vec![]),
+                    HeapVal::Array(..) => Value::Ptr(vec![]),
                 }
             }
         }
@@ -893,7 +1022,7 @@ impl<'a> Vm<'a> {
     #[inline]
     fn print_slot(&mut self, s: Slot) {
         match s.tag {
-            Tag::Void => {}
+            Tag::Void | Tag::Ref => {}
             Tag::Int => {
                 let mut tmp = itoa::Buffer::new();
                 self.stdout
@@ -932,7 +1061,6 @@ impl<'a> Vm<'a> {
                         self.stdout.write(&b);
                         self.stdout.write(b"]\n");
                     }
-                    HeapVal::Ref(..) => self.stdout.write(b"<ref>\n"),
                 }
             }
         }
@@ -940,6 +1068,42 @@ impl<'a> Vm<'a> {
 
     fn find_func(&self, name: &str) -> Option<usize> {
         self.func_index.get(name).copied()
+    }
+
+    /// Look up the positional field index for `field_name` within a named struct or array type.
+    /// For arrays: searches `field_order` stored in the `HeapVal::Array`.
+    /// For structs: searches the program's struct definition (stable ordering).
+    #[inline]
+    fn field_pos_in_array(
+        heap: &[HeapVal],
+        arr_hidx: u32,
+        field_name: &str,
+    ) -> Result<u16, String> {
+        match &heap[arr_hidx as usize] {
+            HeapVal::Array(_, field_order, _) => field_order
+                .iter()
+                .position(|f| f == field_name)
+                .map(|p| p as u16)
+                .ok_or_else(|| format!("get_field_ref: no field '{field_name}'")),
+            _ => Err("get_field_ref: ref target is not an array".into()),
+        }
+    }
+
+    #[inline]
+    fn field_pos_in_struct(
+        program: &Program,
+        struct_name: &str,
+        field_name: &str,
+    ) -> Result<u16, String> {
+        program
+            .structs
+            .iter()
+            .find(|s| s.name == struct_name)
+            .and_then(|s| s.fields.iter().position(|(n, _)| n == field_name))
+            .map(|p| p as u16)
+            .ok_or_else(|| {
+                format!("get_field_ref: no field '{field_name}' on struct '{struct_name}'")
+            })
     }
 
     fn exec_func(&mut self, func_idx: usize, args: &[Slot]) -> Result<Slot, String> {
@@ -999,10 +1163,9 @@ impl<'a> Vm<'a> {
             let ins = unsafe { *code.get_unchecked(pc) };
             pc += 1;
             match ins.op {
-                Op::SetLabel | Op::Move => {
-                    if ins.op == Op::Move {
-                        *reg_mut!(ins.dst) = reg!(ins.a);
-                    }
+                Op::SetLabel => {}
+                Op::Move => {
+                    *reg_mut!(ins.dst) = reg!(ins.a);
                 }
                 Op::LoadInt => {
                     *reg_mut!(ins.dst) = Slot::int(cf.int_pool[ins.a as usize]);
@@ -1101,76 +1264,128 @@ impl<'a> Vm<'a> {
                         }
                         _ => return Err("get_index_ref: not an array".into()),
                     }
-                    *reg_mut!(ins.dst) =
-                        self.alloc_heap(HeapVal::Ref(arr_hidx, elem_idx, "__elem__".into()));
+                    *reg_mut!(ins.dst) = Slot::ref_slot(arr_hidx, elem_idx as u16, REF_NO_FIELD);
                 }
                 Op::GetFieldRef => {
-                    let ref_slot = reg!(ins.a);
-                    let ref_hidx = ref_slot
-                        .heap_idx()
-                        .ok_or("get_field_ref: not a heap value")?;
-                    let field = cf.name_pool[ins.b as usize].clone();
-                    let new_ref = match &self.heap[ref_hidx as usize] {
-                        HeapVal::Ref(arr_idx, elem_idx, sentinel) if sentinel == "__elem__" => {
-                            let arr_idx = *arr_idx;
-                            let elem_idx = *elem_idx;
-                            match &self.heap[arr_idx as usize] {
-                                HeapVal::Array(_, field_order, _) => {
-                                    if !field_order.contains(&field) {
-                                        return Err(format!("get_field_ref: no field '{field}'"));
-                                    }
-                                }
-                                _ => return Err("get_field_ref: ref target is not an array".into()),
+                    let src = reg!(ins.a);
+                    let field_name = &cf.name_pool[ins.b as usize];
+                    let new_ref = match src.tag {
+                        Tag::Ref => {
+                            let (target, elem_idx, prev_field) = src.unpack_ref();
+                            if prev_field != REF_NO_FIELD {
+                                return Err("get_field_ref: ref already has a field".into());
                             }
-                            HeapVal::Ref(arr_idx, elem_idx, field)
+                            let fpos = Self::field_pos_in_array(&self.heap, target, field_name)?;
+                            Slot::ref_slot(target, elem_idx, fpos)
                         }
-                        HeapVal::Struct(_, fields) => {
-                            if !fields.contains_key(&field) {
-                                return Err(format!("get_field_ref: no field '{field}'"));
+                        Tag::Heap => {
+                            let struct_hidx = unsafe { src.raw.idx };
+                            match &self.heap[struct_hidx as usize] {
+                                HeapVal::Struct(struct_name, fields) => {
+                                    if !fields.contains_key(field_name.as_str()) {
+                                        return Err(format!(
+                                            "get_field_ref: no field '{field_name}'"
+                                        ));
+                                    }
+                                    let struct_name = struct_name.clone();
+                                    let fpos = Self::field_pos_in_struct(
+                                        self.program,
+                                        &struct_name,
+                                        field_name,
+                                    )?;
+                                    Slot::ref_slot(struct_hidx, REF_STRUCT_ELEM, fpos)
+                                }
+                                _ => return Err("get_field_ref: not a ref or struct".into()),
                             }
-                            HeapVal::Ref(ref_hidx, 0, field)
                         }
                         _ => return Err("get_field_ref: not a ref or struct".into()),
                     };
-                    *reg_mut!(ins.dst) = self.alloc_heap(new_ref);
+                    *reg_mut!(ins.dst) = new_ref;
                 }
                 Op::LoadRef => {
-                    let ref_hidx = reg!(ins.a).heap_idx().ok_or("load: not a heap value")? as usize;
-                    let val = match &self.heap[ref_hidx] {
-                        HeapVal::Ref(tidx, eidx, field) => {
-                            let tidx = *tidx as usize;
-                            let eidx = *eidx;
-                            let field = field.clone();
-                            match &self.heap[tidx] {
-                                HeapVal::Array(_, _, elems) => {
-                                    elems[eidx].get(&field).copied().unwrap_or(Slot::void())
-                                }
-                                HeapVal::Struct(_, fields) => {
-                                    fields.get(&field).copied().unwrap_or(Slot::void())
-                                }
-                                _ => return Err("load: ref target is not array/struct".into()),
+                    let ref_slot = reg!(ins.a);
+                    if ref_slot.tag != Tag::Ref {
+                        return Err("load: not a ref".into());
+                    }
+                    let (target, elem_idx, field_pos) = ref_slot.unpack_ref();
+                    if field_pos == REF_NO_FIELD {
+                        return Err("load: ref has no field (call get_field_ref first)".into());
+                    }
+                    let val = if elem_idx == REF_STRUCT_ELEM {
+                        let struct_name = match &self.heap[target as usize] {
+                            HeapVal::Struct(n, _) => n.clone(),
+                            _ => return Err("load: struct ref target is not a struct".into()),
+                        };
+                        let field_name = self
+                            .program
+                            .structs
+                            .iter()
+                            .find(|s| s.name == struct_name)
+                            .and_then(|s| s.fields.get(field_pos as usize))
+                            .map(|(n, _)| n.clone())
+                            .ok_or_else(|| format!("load: invalid field pos {field_pos}"))?;
+                        match &self.heap[target as usize] {
+                            HeapVal::Struct(_, fields) => {
+                                fields.get(&field_name).copied().unwrap_or(Slot::void())
                             }
+                            _ => unreachable!(),
                         }
-                        _ => return Err("load: not a ref".into()),
+                    } else {
+                        match &self.heap[target as usize] {
+                            HeapVal::Array(_, field_order, elems) => {
+                                let fname = &field_order[field_pos as usize];
+                                elems[elem_idx as usize]
+                                    .get(fname)
+                                    .copied()
+                                    .unwrap_or(Slot::void())
+                            }
+                            _ => return Err("load: array ref target is not an array".into()),
+                        }
                     };
                     *reg_mut!(ins.dst) = val;
                 }
                 Op::StoreRef => {
                     let val = reg!(ins.a);
-                    let ref_hidx =
-                        reg!(ins.dst).heap_idx().ok_or("store: not a heap value")? as usize;
-                    let (tidx, eidx, field) = match &self.heap[ref_hidx] {
-                        HeapVal::Ref(t, e, f) => (*t as usize, *e, f.clone()),
-                        _ => return Err("store: not a ref".into()),
-                    };
-                    match &mut self.heap[tidx] {
-                        HeapVal::Array(_, _, elems) => {
-                            elems[eidx].insert(field, val);
+                    let ref_slot = reg!(ins.dst);
+                    if ref_slot.tag != Tag::Ref {
+                        return Err("store: not a ref".into());
+                    }
+                    let (target, elem_idx, field_pos) = ref_slot.unpack_ref();
+                    if field_pos == REF_NO_FIELD {
+                        return Err("store: ref has no field (call get_field_ref first)".into());
+                    }
+                    if elem_idx == REF_STRUCT_ELEM {
+                        let struct_name = match &self.heap[target as usize] {
+                            HeapVal::Struct(n, _) => n.clone(),
+                            _ => return Err("store: struct ref target is not a struct".into()),
+                        };
+                        let field_name = self
+                            .program
+                            .structs
+                            .iter()
+                            .find(|s| s.name == struct_name)
+                            .and_then(|s| s.fields.get(field_pos as usize))
+                            .map(|(n, _)| n.clone())
+                            .ok_or_else(|| format!("store: invalid field pos {field_pos}"))?;
+                        match &mut self.heap[target as usize] {
+                            HeapVal::Struct(_, fields) => {
+                                fields.insert(field_name, val);
+                            }
+                            _ => unreachable!(),
                         }
-                        HeapVal::Struct(_, fields) => {
-                            fields.insert(field, val);
+                    } else {
+                        let fname = match &self.heap[target as usize] {
+                            HeapVal::Array(_, field_order, _) => {
+                                field_order[field_pos as usize].clone()
+                            }
+                            _ => return Err("store: array ref target is not an array".into()),
+                        };
+                        match &mut self.heap[target as usize] {
+                            HeapVal::Array(_, _, elems) => {
+                                elems[elem_idx as usize].insert(fname, val);
+                            }
+                            _ => unreachable!(),
                         }
-                        _ => return Err("store: ref target is not array/struct".into()),
                     }
                 }
                 Op::GetField => {
