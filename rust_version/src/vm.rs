@@ -29,8 +29,19 @@ struct Slot {
     raw: RawVal,
 }
 
+/// Sentinel value for field_pos meaning "no field resolved yet".
 const REF_NO_FIELD: u16 = 0xFFFF;
-const REF_STRUCT_ELEM: u16 = 0xFFFF;
+
+/// Bit layout of RawVal::ref_ (u64):
+///
+///  bit 63        — kind: 0 = array-element ref, 1 = struct ref
+///  bits [62:32]  — target_hidx: u31 (heap index of the Array or Struct)
+///  bits [31:16]  — elem_idx: u16   (array element index; unused/0 for struct refs)
+///  bits [15:0]   — field_pos: u16  (positional field index; REF_NO_FIELD = not yet set)
+///
+/// Using a kind bit instead of a sentinel in elem_idx means elem_idx has its full
+/// u16 range (0..=65534 safely, 0xFFFF is also fine since we never test it as sentinel).
+const REF_KIND_STRUCT: u64 = 1u64 << 63;
 
 impl Slot {
     #[inline(always)]
@@ -40,6 +51,7 @@ impl Slot {
             raw: RawVal { _pad: 0 },
         }
     }
+
     #[inline(always)]
     const fn int(n: i64) -> Self {
         Slot {
@@ -47,6 +59,7 @@ impl Slot {
             raw: RawVal { int: n },
         }
     }
+
     #[inline(always)]
     const fn bool(b: bool) -> Self {
         Slot {
@@ -54,6 +67,7 @@ impl Slot {
             raw: RawVal { bool: b },
         }
     }
+
     #[inline(always)]
     const fn file(n: i64) -> Self {
         Slot {
@@ -61,6 +75,7 @@ impl Slot {
             raw: RawVal { int: n },
         }
     }
+
     #[inline(always)]
     fn heap(idx: u32) -> Self {
         Slot {
@@ -68,22 +83,45 @@ impl Slot {
             raw: RawVal { idx },
         }
     }
+
+    /// Encode an inline array-element reference.
+    /// `target`    — heap index of the HeapVal::Array
+    /// `elem_idx`  — index of the element within the array (full u16 range)
+    /// `field_pos` — positional field index; REF_NO_FIELD (0xFFFF) = not yet narrowed
     #[inline(always)]
-    fn ref_slot(target: u32, elem_idx: u16, field_pos: u16) -> Self {
+    fn ref_array(target: u32, elem_idx: u16, field_pos: u16) -> Self {
         let packed: u64 = ((target as u64) << 32) | ((elem_idx as u64) << 16) | (field_pos as u64);
+        // kind bit = 0 (array)
         Slot {
             tag: Tag::Ref,
             raw: RawVal { ref_: packed },
         }
     }
+
+    /// Encode an inline struct reference.
+    /// `target`    — heap index of the HeapVal::Struct
+    /// `field_pos` — positional field index; REF_NO_FIELD = not yet narrowed
     #[inline(always)]
-    fn unpack_ref(self) -> (u32, u16, u16) {
+    fn ref_struct(target: u32, field_pos: u16) -> Self {
+        let packed: u64 = REF_KIND_STRUCT | ((target as u64) << 32) | (field_pos as u64);
+        Slot {
+            tag: Tag::Ref,
+            raw: RawVal { ref_: packed },
+        }
+    }
+
+    /// Decode a Ref slot. Returns `(is_struct, target_hidx, elem_idx, field_pos)`.
+    /// `elem_idx` is meaningless when `is_struct` is true.
+    #[inline(always)]
+    fn unpack_ref(self) -> (bool, u32, u16, u16) {
         let v = unsafe { self.raw.ref_ };
-        let target = (v >> 32) as u32;
+        let is_struct = (v & REF_KIND_STRUCT) != 0;
+        let target = ((v >> 32) & 0x7FFF_FFFF) as u32;
         let elem_idx = ((v >> 16) & 0xFFFF) as u16;
         let field_pos = (v & 0xFFFF) as u16;
-        (target, elem_idx, field_pos)
+        (is_struct, target, elem_idx, field_pos)
     }
+
     #[inline(always)]
     fn as_int(self) -> Option<i64> {
         if self.tag == Tag::Int {
@@ -92,6 +130,7 @@ impl Slot {
             None
         }
     }
+
     #[inline(always)]
     fn heap_idx(self) -> Option<u32> {
         if self.tag == Tag::Heap {
@@ -177,7 +216,7 @@ pub enum Op {
     SimdLoop,
 }
 
-/// A single flat instruction. Kept small (8 bytes) for cache friendliness.
+/// A single flat instruction.
 #[derive(Clone, Copy, Debug)]
 pub struct Instr {
     pub op: Op,
@@ -1264,19 +1303,24 @@ impl<'a> Vm<'a> {
                         }
                         _ => return Err("get_index_ref: not an array".into()),
                     }
-                    *reg_mut!(ins.dst) = Slot::ref_slot(arr_hidx, elem_idx as u16, REF_NO_FIELD);
+                    *reg_mut!(ins.dst) = Slot::ref_array(arr_hidx, elem_idx as u16, REF_NO_FIELD);
                 }
                 Op::GetFieldRef => {
                     let src = reg!(ins.a);
                     let field_name = &cf.name_pool[ins.b as usize];
                     let new_ref = match src.tag {
                         Tag::Ref => {
-                            let (target, elem_idx, prev_field) = src.unpack_ref();
+                            let (is_struct, target, elem_idx, prev_field) = src.unpack_ref();
+                            if is_struct {
+                                return Err(
+                                    "get_field_ref: ref already points to a struct field".into()
+                                );
+                            }
                             if prev_field != REF_NO_FIELD {
                                 return Err("get_field_ref: ref already has a field".into());
                             }
                             let fpos = Self::field_pos_in_array(&self.heap, target, field_name)?;
-                            Slot::ref_slot(target, elem_idx, fpos)
+                            Slot::ref_array(target, elem_idx, fpos)
                         }
                         Tag::Heap => {
                             let struct_hidx = unsafe { src.raw.idx };
@@ -1293,7 +1337,7 @@ impl<'a> Vm<'a> {
                                         &struct_name,
                                         field_name,
                                     )?;
-                                    Slot::ref_slot(struct_hidx, REF_STRUCT_ELEM, fpos)
+                                    Slot::ref_struct(struct_hidx, fpos)
                                 }
                                 _ => return Err("get_field_ref: not a ref or struct".into()),
                             }
@@ -1307,11 +1351,11 @@ impl<'a> Vm<'a> {
                     if ref_slot.tag != Tag::Ref {
                         return Err("load: not a ref".into());
                     }
-                    let (target, elem_idx, field_pos) = ref_slot.unpack_ref();
+                    let (is_struct, target, elem_idx, field_pos) = ref_slot.unpack_ref();
                     if field_pos == REF_NO_FIELD {
                         return Err("load: ref has no field (call get_field_ref first)".into());
                     }
-                    let val = if elem_idx == REF_STRUCT_ELEM {
+                    let val = if is_struct {
                         let struct_name = match &self.heap[target as usize] {
                             HeapVal::Struct(n, _) => n.clone(),
                             _ => return Err("load: struct ref target is not a struct".into()),
@@ -1350,11 +1394,11 @@ impl<'a> Vm<'a> {
                     if ref_slot.tag != Tag::Ref {
                         return Err("store: not a ref".into());
                     }
-                    let (target, elem_idx, field_pos) = ref_slot.unpack_ref();
+                    let (is_struct, target, elem_idx, field_pos) = ref_slot.unpack_ref();
                     if field_pos == REF_NO_FIELD {
                         return Err("store: ref has no field (call get_field_ref first)".into());
                     }
-                    if elem_idx == REF_STRUCT_ELEM {
+                    if is_struct {
                         let struct_name = match &self.heap[target as usize] {
                             HeapVal::Struct(n, _) => n.clone(),
                             _ => return Err("store: struct ref target is not a struct".into()),
