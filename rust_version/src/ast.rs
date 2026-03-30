@@ -18,11 +18,18 @@ pub struct StructDef {
 /// @name(params): ret_ty { body }
 #[derive(Debug, Clone)]
 pub struct Function {
+    /// The name of the function.
     pub name: String,
-    /// (param_name, type, reg_idx)
+
+    /// The parameters in the format (param_name, type, reg_idx)
     pub params: Vec<(String, Ty, RegIdx)>,
+
+    /// The return type of the function.
     pub ret_ty: Ty,
+
+    /// The function body.
     pub body: Vec<Stmt>,
+
     /// Total number of registers used in this function
     pub n_regs: u16,
 }

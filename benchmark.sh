@@ -5,7 +5,7 @@
 set -e
 
 RUST_BIN="./rust_version/target/release/bear"
-ZIG_BIN="./zig_rewrite/zig-out/bin/bear-zig"
+ZIG_BIN="./zig_rewrite/zig-out/bin/bear"
 SAMPLES_DIR="./samples"
 
 echo "==> Building Rust (release)..."
