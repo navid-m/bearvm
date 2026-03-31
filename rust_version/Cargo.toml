@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 rustc-hash = "2"
 itoa = "1"
+smallvec = "1"
 
 [profile.release]
 opt-level = 3
