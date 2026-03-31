@@ -1,32 +1,70 @@
 mod ast;
-mod vm;
+mod ast_printer;
 mod lexer;
 mod parser;
 mod qbe;
+mod vm;
 
-use std::env;
+use clap::{Parser, Subcommand};
 use std::fs;
 use std::process;
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
+#[derive(Parser)]
+#[command(name = "bear")]
+#[command(about = "BearVM - VM for QBE/SSA and interpreted modes of execution")]
+#[command(help_template = "\
+Usage:
+  {bin} <file.bear>                  Run via interpreter
+  {bin} qbe <file.bear>              Emit QBE IR
+  {bin} qbe <file.bear> -c           Compile with QBE
 
-    match args.as_slice() {
-        [_, path] => {
-            run_interpreter(path);
+Options:
+  --print-ast                       Print the AST and exit
+  -h, --help                        Print help
+")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
+    /// Path to the source file
+    #[arg(value_name = "FILE")]
+    file: Option<String>,
+
+    /// Print the AST and exit
+    #[arg(long)]
+    print_ast: bool,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Emit QBE IR or compile with QBE
+    Qbe {
+        /// Path to the source file
+        file: String,
+
+        /// Compile with QBE (run qbe and cc)
+        #[arg(short, long)]
+        compile: bool,
+    },
+}
+
+fn main() {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(Commands::Qbe { file, compile }) => {
+            run_qbe(&file, compile);
         }
-        [_, mode, path] if mode == "qbe" => {
-            run_qbe(path, false);
-        }
-        [_, mode, path, flag] if mode == "qbe" && (flag == "-c" || flag == "--compile") => {
-            run_qbe(path, true);
-        }
-        _ => {
-            eprintln!("Usage:");
-            eprintln!("  bear <file.bear>                  Run via interpreter");
-            eprintln!("  bear qbe <file.bear>              Emit QBE IR");
-            eprintln!("  bear qbe <file.bear> -c           Compile with QBE");
-            process::exit(1);
+        None => {
+            let Some(file) = cli.file else {
+                eprintln!("Error: No input file specified");
+                process::exit(1);
+            };
+            if cli.print_ast {
+                print_ast(&file);
+            } else {
+                run_interpreter(&file);
+            }
         }
     }
 }
@@ -44,6 +82,11 @@ fn load(path: &str) -> ast::Program {
         eprintln!("Parse error: {e}");
         process::exit(1);
     })
+}
+
+fn print_ast(path: &str) {
+    let program = load(path);
+    ast_printer::AstPrinter::print(&program);
 }
 
 fn run_interpreter(path: &str) {
