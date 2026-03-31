@@ -123,15 +123,6 @@ impl Slot {
     }
 
     #[inline(always)]
-    fn as_int(self) -> Option<i64> {
-        if self.tag == Tag::Int {
-            Some(unsafe { self.raw.int })
-        } else {
-            None
-        }
-    }
-
-    #[inline(always)]
     fn heap_idx(self) -> Option<u32> {
         if self.tag == Tag::Heap {
             Some(unsafe { self.raw.idx })
