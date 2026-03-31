@@ -85,8 +85,7 @@ fn load(path: &str) -> ast::Program {
 }
 
 fn print_ast(path: &str) {
-    let program = load(path);
-    ast_printer::AstPrinter::print(&program);
+    ast_printer::AstPrinter::print(&load(path));
 }
 
 fn run_interpreter(path: &str) {
