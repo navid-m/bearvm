@@ -13,14 +13,15 @@ use std::process;
 #[command(name = "bear")]
 #[command(about = "BearVM - VM for QBE/SSA and interpreted modes of execution")]
 #[command(help_template = "\
-Usage:
-  {bin} <file.bear>                  Run via interpreter
-  {bin} qbe <file.bear>              Emit QBE IR
-  {bin} qbe <file.bear> -c           Compile with QBE
+Usage: bear [subcommand] [options]
+
+    <file.bear>                  Run via interpreter
+    qbe <file.bear>              Emit QBE IR
+    qbe <file.bear> -c           Compile with QBE
 
 Options:
-  --print-ast                       Print the AST and exit
-  -h, --help                        Print help
+  --print-ast                    Print the AST and exit
+  -h, --help                     Print help
 ")]
 struct Cli {
     #[command(subcommand)]
