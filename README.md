@@ -4,7 +4,7 @@ BearVM is a compact virtual machine that executes programs written in a simple, 
 
 ## Purpose
 
-BearVM is designed to support the execution needs of Axe, a language focused on expressing concurrent and parallel computations in a structured way. The VM provides primitives that map directly to Axe's concurrency model while remaining general enough to serve other potential front-ends in the future.
+BearVM is designed to support the execution needs of [Axe](https://github.com/axelang/axe), a language focused on expressing concurrent and parallel computations in a structured way. The VM provides primitives that map directly to Axe's concurrency model while remaining general enough to serve other potential front-ends in the future.
 
 ## Core Characteristics
 
