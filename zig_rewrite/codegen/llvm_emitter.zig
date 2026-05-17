@@ -665,9 +665,9 @@ const Emitter = struct {
                 try self.out.appendSlice(self.alloc, ":\n");
             },
             .label => |name| {
-                const trimmed = std.mem.trimRight(u8, self.out.items, " \t\n");
+                const trimmed = std.mem.trimEnd(u8, self.out.items, " \t\n");
                 const last_nl = std.mem.lastIndexOfScalar(u8, trimmed, '\n') orelse 0;
-                const last_line = std.mem.trimLeft(u8, trimmed[last_nl..], "\n");
+                const last_line = std.mem.trimStart(u8, trimmed[last_nl..], "\n");
                 const has_terminator = std.mem.startsWith(u8, last_line, "  br ") or
                     std.mem.startsWith(u8, last_line, "  ret ") or
                     std.mem.endsWith(u8, last_line, ":");
@@ -826,9 +826,9 @@ const Emitter = struct {
 
         const body_text = self.out.items[body_start..];
         const needs_ret = std.mem.indexOf(u8, body_text, "\n  ret ") == null and
-            !std.mem.endsWith(u8, std.mem.trimRight(u8, body_text, "\n"), "  ret void") and
-            !std.mem.endsWith(u8, std.mem.trimRight(u8, body_text, "\n"), "  ret i64") and
-            !std.mem.endsWith(u8, std.mem.trimRight(u8, body_text, "\n"), "  ret double");
+            !std.mem.endsWith(u8, std.mem.trimEnd(u8, body_text, "\n"), "  ret void") and
+            !std.mem.endsWith(u8, std.mem.trimEnd(u8, body_text, "\n"), "  ret i64") and
+            !std.mem.endsWith(u8, std.mem.trimEnd(u8, body_text, "\n"), "  ret double");
         if (needs_ret) {
             if (func.ret_ty == .void_) {
                 try self.out.appendSlice(self.alloc, "  ret void\n");

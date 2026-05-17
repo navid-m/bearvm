@@ -669,7 +669,7 @@ const Compiler = struct {
                     self.buf.emit(blr(SCRATCH_C));
                 },
 
-                .free => |_| {
+                .free => {
                     // NOOP in JIT...
                     // Because heap tracking requires the VM's allocator/table.
                 },
