@@ -30,4 +30,19 @@ pub fn build(b: *std.Build) void {
     });
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+
+    const check = b.step("check", "lsp check");
+
+    const check_exe = b.addExecutable(.{
+        .name = "bear",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bear.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .use_llvm = false,
+        .use_lld = false,
+    });
+
+    check.dependOn(&check_exe.step);
 }

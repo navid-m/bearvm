@@ -1,4 +1,7 @@
 const std = @import("std");
+const Io = std.Io;
+const Dir = Io.Dir;
+const File = Io.File;
 const lexer = @import("../ast/lexer.zig");
 const bear_io = @import("io.zig");
 
@@ -11,12 +14,12 @@ const Task = struct {
 };
 
 pub const TaskTable = struct {
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
     tasks: std.ArrayListUnmanaged(Task),
     alloc: std.mem.Allocator,
 
     pub fn init(alloc: std.mem.Allocator) TaskTable {
-        return .{ .mutex = .{}, .tasks = .empty, .alloc = alloc };
+        return .{ .mutex = std.Io.Mutex.init, .tasks = .empty, .alloc = alloc };
     }
 
     pub fn deinit(self: *TaskTable) void {
@@ -24,39 +27,60 @@ pub const TaskTable = struct {
     }
 
     pub fn reserve(self: *TaskTable) !u32 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        var io = std.Io.Threaded.init_single_threaded;
+        defer io.deinit();
+        try self.mutex.lock(io.io());
+        defer self.mutex.unlock(io.io());
         const id: u32 = @intCast(self.tasks.items.len);
         try self.tasks.append(self.alloc, .{ .thread = undefined, .state = .running, .result = .void_, .err = null });
         return id;
     }
-
+    fn lockMutex(self: *TaskTable) !Io.Threaded {
+        var io = Io.Threaded.init_single_threaded;
+        try self.mutex.lock(io.io());
+        return io;
+    }
+    fn unlockMutex(self: *TaskTable, io: *Io.Threaded) void {
+        self.mutex.unlock(io.io());
+        io.deinit();
+    }
     pub fn setThread(self: *TaskTable, id: u32, thread: std.Thread) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        var io = self.lockMutex() catch @panic("couldnt lock mutex");
+        defer self.unlockMutex(&io);
         self.tasks.items[id].thread = thread;
     }
 
     pub fn complete(self: *TaskTable, id: u32, result: Value, err: ?anyerror) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        var io = self.lockMutex() catch @panic("couldnt lock mutex");
+        defer self.unlockMutex(&io);
         self.tasks.items[id].result = result;
         self.tasks.items[id].err = err;
         self.tasks.items[id].state = .done;
     }
 
     pub fn join(self: *TaskTable, id: u32) !Value {
-        self.mutex.lock();
+        var io = self.lockMutex() catch @panic("couldnt lock mutex");
         const thread = self.tasks.items[id].thread;
-        self.mutex.unlock();
+        self.unlockMutex(&io);
         thread.join();
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        io = self.lockMutex() catch @panic("couldnt lock mutex");
+        defer self.unlockMutex(&io);
         const task = &self.tasks.items[id];
         if (task.err) |e| return e;
         return task.result;
     }
 };
+
+fn readFileSingleThreaded(f: File, buf: *[]u8) !usize {
+    var io = Io.Threaded.init_single_threaded;
+    defer io.deinit();
+    return try f.readStreaming(io.io(), &.{buf.*});
+}
+fn writeFileSingleThreaded(f: std.Io.File, buf: []const u8) !void {
+    var io = std.Io.Threaded.init_single_threaded;
+    defer io.deinit();
+    try f.writeStreamingAll(io.io(), buf);
+}
 
 const SpawnArgs = struct {
     program: *const lexer.Program,
@@ -117,7 +141,7 @@ pub const Value = union(enum) {
             .struct_ => |*sv| {
                 var it = sv.fields.iterator();
                 while (it.next()) |entry| entry.value_ptr.deinit(alloc);
-                sv.fields.deinit();
+                sv.fields.deinit(alloc);
             },
             else => {},
         }
@@ -144,12 +168,12 @@ pub const HeapCell = struct { value: Value };
 
 pub const HeapStruct = struct {
     name: []const u8,
-    fields: std.StringArrayHashMap(HeapCell),
+    fields: std.StringArrayHashMapUnmanaged(HeapCell),
 
     pub fn deinit(self: *HeapStruct, alloc: std.mem.Allocator) void {
         var it = self.fields.iterator();
         while (it.next()) |entry| entry.value_ptr.value.deinit(alloc);
-        self.fields.deinit();
+        self.fields.deinit(alloc);
     }
 };
 
@@ -179,7 +203,7 @@ pub const BearArena = struct {
     }
 };
 
-const StructVal = struct { name: []const u8, fields: std.StringArrayHashMap(Value) };
+const StructVal = struct { name: []const u8, fields: std.StringArrayHashMapUnmanaged(Value) };
 const BuiltinTag = enum(u8) { puts, open, read, write, close, flush, putf };
 const builtin_map = std.StaticStringMap(BuiltinTag).initComptime(.{
     .{ "puts", .puts },   .{ "open", .open },   .{ "read", .read },
@@ -187,7 +211,7 @@ const builtin_map = std.StaticStringMap(BuiltinTag).initComptime(.{
     .{ "putf", .putf },
 });
 
-const FileHandle = union(enum) { read: std.fs.File, write: std.fs.File };
+const FileHandle = union(enum) { read: File, write: File };
 const CallTarget = union(enum) { builtin: BuiltinTag, user: u32 };
 
 pub const Op = enum(u8) {
@@ -1288,7 +1312,7 @@ pub const Vm = struct {
                         return error.UnknownType;
                     };
                     const hs = try self.alloc.create(HeapStruct);
-                    hs.* = .{ .name = struct_def.name, .fields = std.StringArrayHashMap(HeapCell).init(self.alloc) };
+                    hs.* = .{ .name = struct_def.name, .fields = try std.StringArrayHashMapUnmanaged(HeapCell).init(self.alloc, &.{}, &.{}) };
                     for (struct_def.fields.items) |f| {
                         const zero: Value = switch (f.ty) {
                             .int => .{ .int = 0 },
@@ -1296,7 +1320,7 @@ pub const Vm = struct {
                             .str => .{ .str = "" },
                             else => .void_,
                         };
-                        try hs.fields.put(f.name, .{ .value = zero });
+                        try hs.fields.put(self.alloc, f.name, .{ .value = zero });
                     }
                     try self.heap_structs.append(self.alloc, hs);
                     const ha = try self.alloc.create(HeapArray);
@@ -1333,7 +1357,7 @@ pub const Vm = struct {
                     ha.* = .{ .cells = try self.alloc.alloc(HeapCell, count), .alloc = self.alloc };
                     for (ha.cells) |*cell| {
                         const hs = try self.alloc.create(HeapStruct);
-                        hs.* = .{ .name = struct_def.name, .fields = std.StringArrayHashMap(HeapCell).init(self.alloc) };
+                        hs.* = .{ .name = struct_def.name, .fields = try std.StringArrayHashMapUnmanaged(HeapCell).init(self.alloc, &.{}, &.{}) };
                         for (struct_def.fields.items) |f| {
                             const zero: Value = switch (f.ty) {
                                 .int => .{ .int = 0 },
@@ -1341,7 +1365,7 @@ pub const Vm = struct {
                                 .str => .{ .str = "" },
                                 else => .void_,
                             };
-                            try hs.fields.put(f.name, .{ .value = zero });
+                            try hs.fields.put(self.alloc, f.name, .{ .value = zero });
                         }
                         try self.heap_structs.append(self.alloc, hs);
                         cell.* = .{ .value = .{ .int = @as(i64, @bitCast(@intFromPtr(hs))) } };
@@ -1371,7 +1395,7 @@ pub const Vm = struct {
                                     .struct_ => |sv| {
                                         var it = sv.fields.iterator();
                                         while (it.next()) |entry| {
-                                            if (hs.fields.getPtr(entry.key_ptr.*)) |fc| fc.value = entry.value_ptr.* else try hs.fields.put(entry.key_ptr.*, .{ .value = entry.value_ptr.* });
+                                            if (hs.fields.getPtr(entry.key_ptr.*)) |fc| fc.value = entry.value_ptr.* else try hs.fields.put(self.alloc, entry.key_ptr.*, .{ .value = entry.value_ptr.* });
                                         }
                                     },
                                     else => return error.TypeMismatch,
@@ -1475,18 +1499,18 @@ pub const Vm = struct {
                 .struct_lit => {
                     const name = str_pool[ins.a];
                     const ar = arg_ranges[ins.b];
-                    var fields = std.StringArrayHashMap(Value).init(self.alloc);
+                    var fields = try std.StringArrayHashMapUnmanaged(Value).init(self.alloc, &.{}, &.{});
                     var i: usize = 0;
                     while (i < ar.len) : (i += 1) {
                         const fn_idx = arg_regs[ar.start + i * 2];
                         const val_reg = arg_regs[ar.start + i * 2 + 1];
-                        try fields.put(str_pool[fn_idx], env[val_reg]);
+                        try fields.put(self.alloc, str_pool[fn_idx], env[val_reg]);
                     }
                     env[ins.dst] = .{ .struct_ = .{ .name = name, .fields = fields } };
                     pc += 1;
                 },
                 .set_field => {
-                    try env[ins.dst].struct_.fields.put(str_pool[ins.a], env[ins.b]);
+                    try env[ins.dst].struct_.fields.put(self.alloc, str_pool[ins.a], env[ins.b]);
                     pc += 1;
                 },
                 .get_field => {
@@ -1560,18 +1584,22 @@ pub const Vm = struct {
                 const path = args[0].str;
                 const mode = args[1].int;
                 const fd = if (mode == 0) inner: {
-                    break :inner try self.allocFile(.{ .read = try std.fs.cwd().openFile(path, .{}) });
+                    var io = Io.Threaded.init_single_threaded;
+                    defer io.deinit();
+                    break :inner try self.allocFile(.{ .read = try Dir.cwd().openFile(io.io(), path, .{}) });
                 } else inner: {
-                    break :inner try self.allocFile(.{ .write = try std.fs.cwd().createFile(path, .{ .truncate = true }) });
+                    var io = Io.Threaded.init_single_threaded;
+                    defer io.deinit();
+                    break :inner try self.allocFile(.{ .write = try Dir.cwd().createFile(io.io(), path, .{ .truncate = true }) });
                 };
                 break :blk .{ .file = fd };
             },
             .read => blk: {
                 const fd: usize = @intCast(args[0].file);
                 const size: usize = @intCast(args[2].int);
-                const buf = try self.alloc.alloc(u8, size);
+                var buf = try self.alloc.alloc(u8, size);
                 const n = switch (self.files.items[fd].?) {
-                    .read => |f| try f.read(buf),
+                    .read => |f| try readFileSingleThreaded(f, &buf),
                     else => return error.InvalidFileHandle,
                 };
                 break :blk .{ .str = buf[0..n] };
@@ -1585,7 +1613,7 @@ pub const Vm = struct {
                     else => return error.TypeMismatch,
                 };
                 switch (self.files.items[fd].?) {
-                    .write => |f| try f.writeAll(data),
+                    .write => |f| try writeFileSingleThreaded(f, data),
                     else => return error.InvalidFileHandle,
                 }
                 break :blk .{ .int = @intCast(data.len) };
@@ -1593,9 +1621,11 @@ pub const Vm = struct {
             .close => blk: {
                 const fd: usize = @intCast(args[0].file);
                 if (fd < self.files.items.len) if (self.files.items[fd]) |fh| {
+                    var io = Io.Threaded.init_single_threaded;
+                    defer io.deinit();
                     switch (fh) {
-                        .read => |f| f.close(),
-                        .write => |f| f.close(),
+                        .read => |f| f.close(io.io()),
+                        .write => |f| f.close(io.io()),
                     }
                     self.files.items[fd] = null;
                 };

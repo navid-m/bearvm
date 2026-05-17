@@ -654,7 +654,7 @@ const Emitter = struct {
 
         for (func.body.items) |*s| try self.emitStmt(s, env, &phi_pre_alloc);
 
-        const last = std.mem.trimRight(u8, self.out.items, "\n");
+        const last = std.mem.trimEnd(u8, self.out.items, "\n");
         const needs_ret = !std.mem.endsWith(u8, last, "ret") and
             !std.mem.endsWith(u8, last, "}") and
             std.mem.lastIndexOf(u8, last, "\n  ret ") == null;

@@ -1,11 +1,16 @@
 const std = @import("std");
+const Io = std.Io;
+const File = Io.File;
 
 var stdout_buf: [65536]u8 = undefined;
 var stdout_pos: usize = 0;
-
+fn writeFileSingleThreaded(f: std.Io.File, buf: []const u8) !void {
+    var io = std.Io.Threaded.init_single_threaded;
+    defer io.deinit();
+    try f.writeStreamingAll(io.io(), buf);
+}
 pub inline fn flushStdout() void {
-    if (stdout_pos == 0) return;
-    _ = std.fs.File.stdout().writeAll(stdout_buf[0..stdout_pos]) catch {};
+    writeFileSingleThreaded(File.stdout(), stdout_buf[0..stdout_pos]) catch {};
     stdout_pos = 0;
 }
 
@@ -14,7 +19,7 @@ pub inline fn writeStdout(s: []const u8) void {
     if (s.len > remaining) {
         if (stdout_pos > 0) flushStdout();
         if (s.len > stdout_buf.len) {
-            _ = std.fs.File.stdout().writeAll(s) catch {};
+            _ = writeFileSingleThreaded(File.stdout(), s) catch {};
             return;
         }
     }

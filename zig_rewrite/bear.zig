@@ -3,6 +3,9 @@
 //! Navid Momtahen (C) - GPL-3.0-only
 
 const std = @import("std");
+const Io = std.Io;
+const Dir = Io.Dir;
+const File = Io.File;
 const builtin = @import("builtin");
 const bear_lexer = @import("./ast/lexer.zig");
 const bear_parser = @import("./ast/parser.zig");
@@ -11,6 +14,11 @@ const bear_vm = @import("./vm/vm.zig");
 const bear_qbe = @import("./codegen/qbe_emitter.zig");
 const bear_llvm = @import("./codegen/llvm_emitter.zig");
 
+fn writeFileSingleThreaded(f: std.Io.File, buf: []const u8) !void {
+    var io = std.Io.Threaded.init_single_threaded;
+    defer io.deinit();
+    try f.writeStreamingAll(io.io(), buf);
+}
 const is_silicon = builtin.target.cpu.arch.isAARCH64() and builtin.target.os.tag.isDarwin();
 
 const bear_jit = if (is_silicon) @import("./codegen/jit.zig") else struct {
@@ -25,16 +33,30 @@ const bear_jit = if (is_silicon) @import("./codegen/jit.zig") else struct {
     }
 };
 
-pub fn main() !void {
+var tempDir: ?[]const u8 = undefined;
+fn getTempDir(allocator: std.mem.Allocator) ![]u8 {
+    return allocator.dupe(u8, tempDir.?);
+}
+
+pub fn main(init: std.process.Init) !void {
+    tempDir = init.environ_map.get("TMPDIR") orelse
+        init.environ_map.get("TMP") orelse
+        init.environ_map.get("TEMP") orelse
+        "/tmp";
+
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 
     defer arena.deinit();
     const alloc = arena.allocator();
-    const argv = try std.process.argsAlloc(alloc);
+
+    const argv = try init.minimal.args.toSlice(alloc);
 
     if (argv.len < 2) {
         printUsage();
         std.process.exit(1);
+    } else if (argv.len == 2 and std.mem.eql(u8, "--help", argv[1])) {
+        printUsage();
+        std.process.exit(0);
     }
 
     const first = argv[1];
@@ -116,11 +138,11 @@ pub fn main() !void {
         printUsage();
         std.process.exit(1);
     }
-
-    const src = std.fs.cwd().readFileAlloc(alloc, file_path.?, 10 * 1024 * 1024) catch |e| {
-        std.debug.print("Error reading {s}: {}\n", .{ file_path.?, e });
-        std.process.exit(1);
-    };
+    const src =
+        Dir.cwd().readFileAlloc(init.io, file_path.?, alloc, .limited(10 * 1024 * 1024)) catch |e| {
+            std.debug.print("Error reading {s}: {}\n", .{ file_path.?, e });
+            std.process.exit(1);
+        };
 
     const tokens = bear_lexer.tokenize(src, alloc) catch |e| {
         std.debug.print("Lex error: {}\n", .{e});
@@ -155,10 +177,13 @@ fn printUsage() void {
 }
 
 fn loadProgram(path: []const u8, alloc: std.mem.Allocator) bear_lexer.Program {
-    const src = std.fs.cwd().readFileAlloc(alloc, path, 10 * 1024 * 1024) catch |e| {
-        std.debug.print("Error reading {s}: {}\n", .{ path, e });
-        std.process.exit(1);
-    };
+    var io: Io.Threaded = .init_single_threaded;
+    defer io.deinit();
+    const src =
+        Dir.cwd().readFileAlloc(io.io(), path, alloc, .limited(10 * 1024 * 1024)) catch |e| {
+            std.debug.print("Error reading {s}: {}\n", .{ path, e });
+            std.process.exit(1);
+        };
     const tokens = bear_lexer.tokenize(src, alloc) catch |e| {
         std.debug.print("Lex error: {}\n", .{e});
         std.process.exit(1);
@@ -225,14 +250,13 @@ fn writeRuntime(alloc: std.mem.Allocator) []const u8 {
         std.debug.print("Failed to write to buffer during runtime attachment: {}\n", .{e});
         std.process.exit(1);
     };
-    std.fs.cwd().writeFile(.{
-        .sub_path = rt_path,
-        .data = bear_runtime_c,
-    }) catch |e| {
+
+    var io = Io.Threaded.init_single_threaded;
+    defer io.deinit();
+    Dir.cwd().writeFile(io.io(), .{ .data = bear_runtime_c, .sub_path = rt_path }) catch |e| {
         std.debug.print("Failed to write runtime: {}\n", .{e});
         std.process.exit(1);
     };
-
     return rt_path;
 }
 
@@ -263,7 +287,9 @@ fn runQbe(program: *const bear_lexer.Program, path: []const u8, compile: bool, a
     makeBvmOutDir();
     const out_path = std.fmt.allocPrint(alloc, "./bvm-out/{s}{s}", .{ stem, extension }) catch unreachable;
 
-    std.fs.cwd().writeFile(.{ .sub_path = ir_path, .data = ir }) catch |e| {
+    var io = Io.Threaded.init_single_threaded;
+    defer io.deinit();
+    Dir.cwd().writeFile(io.io(), .{ .data = ir, .sub_path = ir_path }) catch |e| {
         if (e == error.FileNotFound) {
             std.debug.print("Failed to write IR: No such path \"{s}\"\n", .{ir_path});
             std.process.exit(1);
@@ -279,7 +305,9 @@ fn runQbe(program: *const bear_lexer.Program, path: []const u8, compile: bool, a
 }
 
 fn makeBvmOutDir() void {
-    std.fs.cwd().makeDir("bvm-out") catch |e| {
+    var io = Io.Threaded.init_single_threaded;
+    defer io.deinit();
+    Dir.cwd().createDir(io.io(), "bvm-out", .default_dir) catch |e| {
         if (e != error.PathAlreadyExists) {
             std.debug.print("Ran into error when creating bvm-out directory: {any}", .{e});
         }
@@ -312,7 +340,9 @@ fn runLlvm(program: *const bear_lexer.Program, path: []const u8, compile: bool, 
     makeBvmOutDir();
     const out_path = std.fmt.allocPrint(alloc, "./bvm-out/{s}{s}", .{ stem, extension }) catch unreachable;
 
-    std.fs.cwd().writeFile(.{ .sub_path = ir_path, .data = ir }) catch |e| {
+    var io = Io.Threaded.init_single_threaded;
+    defer io.deinit();
+    Dir.cwd().writeFile(io.io(), .{ .sub_path = ir_path, .data = ir }) catch |e| {
         if (e == error.FileNotFound) {
             std.debug.print("Failed to write IR: No such path \"{s}\"\n", .{ir_path});
             std.process.exit(1);
@@ -326,21 +356,14 @@ fn runLlvm(program: *const bear_lexer.Program, path: []const u8, compile: bool, 
     std.debug.print("Compiled to {s}\n", .{out_path});
 }
 
-fn getTempDir(allocator: std.mem.Allocator) ![]u8 {
-    const env = std.process;
-    if (env.getEnvVarOwned(allocator, "TMPDIR")) |p| return p else |_| {}
-    if (env.getEnvVarOwned(allocator, "TMP")) |p| return p else |_| {}
-    if (env.getEnvVarOwned(allocator, "TEMP")) |p| return p else |_| {}
-    return allocator.dupe(u8, "/tmp");
-}
-
 fn runCmd(alloc: std.mem.Allocator, argv: []const []const u8, name: []const u8) void {
-    var child = std.process.Child.init(argv, alloc);
-    const term = child.spawnAndWait() catch |e| {
+    var io = Io.Threaded.init_single_threaded;
+    defer io.deinit();
+    const child = std.process.run(alloc, io.io(), .{ .argv = argv }) catch |e| {
         std.debug.print("Failed to run {s}: {}\n", .{ name, e });
         std.process.exit(1);
     };
-    if (term != .Exited or term.Exited != 0) {
+    if (child.term == .exited or child.term.exited != 0) {
         std.debug.print("{s} failed\n", .{name});
         std.process.exit(1);
     }
